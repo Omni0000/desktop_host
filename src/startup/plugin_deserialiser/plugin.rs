@@ -19,11 +19,11 @@ impl<'a> Plugin {
         Ok( Self { id, manifest, raw })
     }
     
-    pub fn _id( &self ) -> &String { &self.id }
+    pub fn id( &self ) -> &PluginId { &self.id }
     pub fn manifest( &'a self ) -> plugin_metadata::Reader<'a> {
         self.manifest.get_root::<plugin_metadata::Reader>().unwrap()
     }
-    pub fn _wasm( &self ) -> Result<Vec<u8>, std::io::Error> { self.raw.wasm_root() }
+    pub fn wasm( &self ) -> std::path::PathBuf { self.raw.wasm_root() }
 
 }
 impl std::fmt::Debug for Plugin {

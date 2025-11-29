@@ -1,3 +1,5 @@
+use crate::startup::startup;
+
 
 pub mod manifest_capnp {
 	include!( concat!( env!( "OUT_DIR" ), "/manifest_capnp.rs" ));
@@ -9,8 +11,11 @@ mod runtime ;
 
 fn main() {
 
-    if let Err( e ) = startup::startup() {
-        eprintln!( "{}", e );
+    match startup::startup() {
+        Ok( mut tree ) => {
+            tree.preload_socket( &"interface0".to_owned() ).unwrap();
+        }
+        Err( e ) => eprintln!( "{}", e ),
     };
 
 }

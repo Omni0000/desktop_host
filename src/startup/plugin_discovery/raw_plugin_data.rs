@@ -18,8 +18,8 @@ impl RawPluginData {
     pub fn manifest( &self ) -> Result<Vec<u8>, std::io::Error> {
         std::fs::read( self.path.join( "manifest.bin" ) )
     }
-    pub fn wasm_root( &self ) -> Result<Vec<u8>, std::io::Error> {
-        std::fs::read( self.path.join( "source.wasm" ))
+    pub fn wasm_root( &self ) -> std::path::PathBuf {
+        self.path.join( "source.wasm" )
     }
     pub fn display_path( &self ) -> String {
         self.path.display().to_string()
