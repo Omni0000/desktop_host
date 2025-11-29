@@ -5,7 +5,9 @@ in
     buildInputs = with pkgs; [
       rustc
       cargo
+      lld
       pkg-config
-      clang # Or gcc
+      clang
+      capnproto
     ];
   }

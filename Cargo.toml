@@ -1,6 +1,15 @@
 [package]
-name = "desktop_host"
+name = "omni_desktop_host"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+wasmtime = "22.0.0"
+tokio = { version = "1.38.0", features = ["full"] }
+chrono = "0.4.38"
+capnp = "0.21"
+thiserror = "1.0"
+indoc = "1.0"
+
+[build-dependencies]
+capnpc = "0.21"
