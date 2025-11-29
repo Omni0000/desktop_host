@@ -1,11 +1,9 @@
-
-use std::path::Path ;
 use std::io::Cursor ;
-use std::fs ;
 use capnp::message::ReaderOptions ;
 use capnp::serialize ;
 
 use crate::manifest_capnp ;
+use crate::startup::plugin_discovery::RawPluginData ;
 use super::MissingManifestErr ;
 use super::plugin::Plugin ;
 use super::plugin_id::PluginId ;
@@ -13,18 +11,14 @@ use super::DecoderError ;
 
 
 
-pub fn get_manifest(
+pub fn parse_plugin(
 
-    plugin_dir: &Path,
+    plugin_data: RawPluginData,
 
 ) -> Result<Plugin, DecoderError> {
 
-    let manifest_path = plugin_dir.join( "manifest.bin" );
-    let wasm_path = plugin_dir.join( "source.wasm" );
-
-    let file_contents = fs::read( &manifest_path )
-        .map_err(| err | MissingManifestErr::new( plugin_dir.into(), err ) )?;
-    let data = Cursor::new( file_contents );
+    let manifest_data = plugin_data.manifest().map_err(| err | MissingManifestErr::new( err, plugin_data.display_path() ) )?;
+    let data = Cursor::new( manifest_data );
 
     let reader = serialize::read_message( data, ReaderOptions::new())
         .map_err(| err | DecoderError::InvalidManifestErr( err ))?;
@@ -37,7 +31,7 @@ pub fn get_manifest(
     Plugin::try_new(
         plugin_id,
         reader,
-        wasm_path,
+        plugin_data,
     ).map_err(| err | DecoderError::InvalidManifestErr( err ))
 
 }

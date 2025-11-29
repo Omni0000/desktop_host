@@ -1,8 +1,7 @@
 
 use std::collections::HashMap ;
 use thiserror::Error ;
-use crate::startup::plugin_decoder::Plugin ;
-use crate::startup::interface_decoder::InterfaceId ;
+use crate::startup::plugin_deserialiser::{ Plugin, InterfaceId };
 
 
 
@@ -12,7 +11,7 @@ pub enum PluginParserError {
     #[error("Utf8Error")] Utf8Error( #[from] std::str::Utf8Error ),
 }
 
-pub fn find_children( plugins: Vec<Plugin> ) -> Result<HashMap<InterfaceId,Vec<Plugin>>, PluginParserError> {
+pub fn build_socket_map( plugins: Vec<Plugin> ) -> Result<HashMap<InterfaceId,Vec<Plugin>>, PluginParserError> {
     
     Ok( plugins
         .into_iter()

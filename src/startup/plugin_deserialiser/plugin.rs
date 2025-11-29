@@ -1,30 +1,29 @@
-
-use std::path::PathBuf ;
 use crate::manifest_capnp::plugin_metadata ;
+use crate::startup::plugin_discovery::RawPluginData ;
 use super::plugin_id::PluginId ;
 
 pub struct Plugin {
     id: PluginId,
     manifest: capnp::message::Reader<capnp::serialize::OwnedSegments>,
-    wasm_path: PathBuf,
+    raw: RawPluginData,
 }
 impl<'a> Plugin {
     
     pub fn try_new(
         id: String,
         manifest: capnp::message::Reader<capnp::serialize::OwnedSegments>,
-        wasm_path: PathBuf,
+        raw: RawPluginData,
     ) -> Result<Self, capnp::Error> {
         // DO NOT REMOVE: Ensures that root exists; .unwrap() in .get_manifest()
         manifest.get_root::<plugin_metadata::Reader>()?;
-        Ok( Self { id, manifest, wasm_path })
+        Ok( Self { id, manifest, raw })
     }
     
     pub fn _id( &self ) -> &String { &self.id }
     pub fn manifest( &'a self ) -> plugin_metadata::Reader<'a> {
         self.manifest.get_root::<plugin_metadata::Reader>().unwrap()
     }
-    pub fn _wasm_path( &self ) -> &PathBuf { &self.wasm_path }
+    pub fn _wasm( &self ) -> Result<Vec<u8>, std::io::Error> { self.raw.wasm_root() }
 
 }
 impl std::fmt::Debug for Plugin {
@@ -32,7 +31,7 @@ impl std::fmt::Debug for Plugin {
         fmt.debug_struct( "Plugin" )
             .field( "id", &self.id )
             .field( "manifest", &self.manifest() )
-            .field( "wasm_path", &self.wasm_path )
+            .field( "raw", &self.raw )
             .finish()
     }
 }
