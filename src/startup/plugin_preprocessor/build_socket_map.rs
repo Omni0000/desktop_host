@@ -6,25 +6,31 @@ use crate::startup::plugin_deserialiser::{ Plugin, InterfaceId };
 
 
 #[derive( Error, Debug )]
-pub enum PluginParserError {
+pub enum PluginPreprocessorError {
     #[error("capnp: {0}")] Capnp( #[from] capnp::Error ),
     #[error("Utf8Error")] Utf8Error( #[from] std::str::Utf8Error ),
 }
 
-pub fn build_socket_map( plugins: Vec<Plugin> ) -> Result<HashMap<InterfaceId,Vec<Plugin>>, PluginParserError> {
+use itertools::Itertools ;
+
+pub fn build_socket_map( plugins: Vec<Plugin> ) -> ( HashMap<InterfaceId,Vec<Plugin>>, Vec<PluginPreprocessorError> ) {
     
-    Ok( plugins
+    let ( parsed, errors ): ( Vec<_>, Vec<_> ) = plugins
         .into_iter()
         .map(| plugin | {
             let plug_id = plugin.manifest().get_plug()?.get_id()?.to_string()?;
             Ok(( plug_id, plugin ))
         })
-        .collect::<Result<Vec<_>, PluginParserError>>()?
-        .into_iter()
-        .fold( HashMap::new(), | mut acc, ( k, v )| {
-            acc.entry( k ).or_insert_with( Vec::new ).push( v );
-            acc
-        })
+        .partition_result();
+    
+    (
+        parsed
+            .into_iter()
+            .fold( HashMap::new(), | mut acc, ( k, v )| {
+                acc.entry( k ).or_insert_with( Vec::new ).push( v );
+                acc
+            }),
+        errors
     )
 
 }

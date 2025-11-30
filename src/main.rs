@@ -1,5 +1,3 @@
-use crate::startup::startup;
-
 
 pub mod manifest_capnp {
 	include!( concat!( env!( "OUT_DIR" ), "/manifest_capnp.rs" ));
