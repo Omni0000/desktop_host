@@ -29,7 +29,7 @@ impl LivePluginTree {
     }
 }
 
-fn load_plugins( engine: &Engine, plugin_list: &mut Vec<PluginTreeNode> ) -> Vec<LoaderError> {
+#[inline] fn load_plugins( engine: &Engine, plugin_list: &mut Vec<PluginTreeNode> ) -> Vec<LoaderError> {
 
     let ( new_list, errors ) = plugin_list
         .drain( .. )
