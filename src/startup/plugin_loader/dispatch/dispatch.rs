@@ -5,7 +5,7 @@ use super::super::{ LivePluginTree, PluginTreeNode };
 use super::super::preload_socket::InvalidSocket ;
 use super::FunctionDispatchInstruction ;
 use super::{ RawMemorySegment, WasmMemorySegment, MemoryReadError, MemorySendError };
-use super::WasmRuntimeContext ;
+use super::WasmSendContext ;
 
 
 
@@ -45,7 +45,7 @@ impl LivePluginTree {
 
 }
 
-pub(in super::super) fn dispatch_function_of( plugin: &mut impl WasmRuntimeContext, function: &String, data: &[u8] ) -> Result< Vec<u8>, DispatchError > {
+pub(in super::super) fn dispatch_function_of( plugin: &mut impl WasmSendContext, function: &String, data: &[u8] ) -> Result< Vec<u8>, DispatchError > {
 
     let params_memory_segment: WasmMemorySegment = plugin.send_data( &data )?;
     let response_memory_segment: RawMemorySegment = plugin
