@@ -1,9 +1,9 @@
-use wasmtime::Engine ;
+use wasmtime::{Engine, Linker} ;
 use itertools::Itertools ;
 
-use crate::startup::{ InterfaceId };
+use crate::startup::{ InterfaceId, Plugin };
 use super::{ LivePluginTree, PluginTreeNode };
-use super::{ load_plugin, LoaderError };
+use super::load_plugin ;
 
 
 
@@ -21,22 +21,26 @@ impl LivePluginTree {
     pub fn preload_socket(
         &mut self,
         socket: &InterfaceId,
-    ) -> Result<Vec<LoaderError>, InvalidSocket> {
+    ) -> Result<Vec<wasmtime::Error>, InvalidSocket> {
         match self.socket_map.get_mut( socket ) {
-            Some( plugin_list ) => Ok( load_plugins( &self.engine, plugin_list ) ),
+            Some( plugin_list ) => Ok( load_plugins( &self.engine, plugin_list, &self.linker ) ),
             Option::None => Err( InvalidSocket( socket.clone() ) ),
         }
     }
 }
 
-#[inline] fn load_plugins( engine: &Engine, plugin_list: &mut Vec<PluginTreeNode> ) -> Vec<LoaderError> {
+#[inline] fn load_plugins(
+    engine: &Engine,
+    plugin_list: &mut Vec<PluginTreeNode>,
+    linker: &Linker<Plugin>,
+) -> Vec<wasmtime::Error> {
 
     let ( new_list, errors ) = plugin_list
         .drain( .. )
         .map(| plugin_node | {
             match plugin_node {
                 PluginTreeNode::LazyPlugin( plugin_data ) => {
-                    load_plugin( engine, plugin_data )
+                    load_plugin( engine, plugin_data, linker )
                         .map( PluginTreeNode::ActivePlugin )
                 }
                 other_node => Ok( other_node ),

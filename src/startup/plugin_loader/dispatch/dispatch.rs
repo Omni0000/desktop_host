@@ -1,11 +1,11 @@
 
 use thiserror::Error ;
 
-use super::super::{ ActivePlugin, LivePluginTree, PluginTreeNode };
-use super::super::load_plugin::LoaderError ;
+use super::super::{ LivePluginTree, PluginTreeNode };
 use super::super::preload_socket::InvalidSocket ;
 use super::FunctionDispatchInstruction ;
-use super::{ RawMemorySegment, WasmMemorySegment, MemoryReadError, MemoryWriteError };
+use super::{ RawMemorySegment, WasmMemorySegment, MemoryReadError, MemorySendError };
+use super::WasmRuntimeContext ;
 
 
 
@@ -13,7 +13,7 @@ use super::{ RawMemorySegment, WasmMemorySegment, MemoryReadError, MemoryWriteEr
 pub enum DispatchError {
     #[error( "Dispatch Failure: {0}" )] DispatchFailure( #[from] wasmtime::Error ),
     #[error( "Memory Read Error: {0}" )] MemoryReadError( #[from] MemoryReadError ),
-    #[error( "Memory Write Error: {0}" )] MemoryWriteError( #[from] MemoryWriteError ),
+    #[error( "Memory Write Error: {0}" )] MemoryWriteError( #[from] MemorySendError ),
 }
 
 impl LivePluginTree {
@@ -24,7 +24,7 @@ impl LivePluginTree {
         params: &[u8],
     ) -> Result<(
         Vec<Result< Vec<u8>, DispatchError >>,
-        Vec<LoaderError>
+        Vec<wasmtime::Error>
     ), InvalidSocket > {
         
         let preload_errors = self.preload_socket( &instruction.socket )?;
@@ -45,12 +45,12 @@ impl LivePluginTree {
 
 }
 
-#[inline] fn dispatch_function_of( plugin: &mut ActivePlugin, function: &String, data: &[u8] ) -> Result< Vec<u8>, DispatchError > {
+pub(in super::super) fn dispatch_function_of( plugin: &mut impl WasmRuntimeContext, function: &String, data: &[u8] ) -> Result< Vec<u8>, DispatchError > {
 
     let params_memory_segment: WasmMemorySegment = plugin.send_data( &data )?;
-    let response_memory_segment: RawMemorySegment = plugin.instance
-        .get_typed_func::<RawMemorySegment, RawMemorySegment>( &mut plugin.store, function )?
-        .call( &mut plugin.store, params_memory_segment.as_send() )?;
+    let response_memory_segment: RawMemorySegment = plugin
+        .get_typed_func( function )?
+        .call( &mut plugin.context_mut(), params_memory_segment.as_send() )?;
     Ok( plugin.read_data( response_memory_segment )? )
 
 }

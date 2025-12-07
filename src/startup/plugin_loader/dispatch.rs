@@ -3,4 +3,5 @@ mod dispatch ;
 mod memory_segment ;
 
 pub use dispatch_instruction::FunctionDispatchInstruction ;
-use memory_segment::{ WasmMemorySegment, RawMemorySegment, MemoryReadError, MemoryWriteError };
+// pub( super ) use dispatch::dispatch_function_of ;
+pub use memory_segment::{ WasmMemorySegment, WasmRuntimeContext, WasmMemSegPtr, WasmMemSegSize, RawMemorySegment, MemoryReadError, MemorySendError };

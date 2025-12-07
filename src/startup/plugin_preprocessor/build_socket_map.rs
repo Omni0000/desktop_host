@@ -1,4 +1,6 @@
 
+use itertools::Itertools ;
+
 use std::collections::HashMap ;
 use thiserror::Error ;
 use crate::startup::plugin_deserialiser::{ Plugin, InterfaceId };
@@ -11,9 +13,9 @@ pub enum PluginPreprocessorError {
     #[error("Utf8Error")] Utf8Error( #[from] std::str::Utf8Error ),
 }
 
-use itertools::Itertools ;
+pub(in super::super) type SocketMap<T> = HashMap<InterfaceId, Vec<T>> ;
 
-pub fn build_socket_map( plugins: Vec<Plugin> ) -> ( HashMap<InterfaceId,Vec<Plugin>>, Vec<PluginPreprocessorError> ) {
+pub fn build_socket_map( plugins: Vec<Plugin> ) -> ( SocketMap<Plugin>, Vec<PluginPreprocessorError> ) {
     
     let ( parsed, errors ): ( Vec<_>, Vec<_> ) = plugins
         .into_iter()

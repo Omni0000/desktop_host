@@ -3,9 +3,8 @@ use crate::startup::Plugin;
 use crate::startup::plugin_deserialiser::PluginId ;
 
 pub struct ActivePlugin {
-    pub(super) id: PluginId,
-    pub(super) plugin: Plugin,
-    pub(super) module: Module,
-    pub(super) store: Store<()>,
+    pub(super) _id: PluginId,
+    pub(super) _module: Module,
+    pub(super) store: Store<Plugin>,
     pub(super) instance: Instance,
 }
