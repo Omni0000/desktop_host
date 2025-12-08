@@ -1,5 +1,5 @@
 
-use crate::manifest_capnp::plugin_id ;
+use crate::capnp::manifest_capnp::plugin_id ;
 
 
 

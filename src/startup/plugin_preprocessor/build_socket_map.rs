@@ -1,9 +1,8 @@
-
 use itertools::Itertools ;
-
 use std::collections::HashMap ;
 use thiserror::Error ;
-use crate::startup::plugin_deserialiser::{ Plugin, InterfaceId };
+
+use crate::startup::plugin_deserialiser::{ InterfaceId, Plugin, PluginId };
 
 
 
@@ -13,25 +12,25 @@ pub enum PluginPreprocessorError {
     #[error("Utf8Error")] Utf8Error( #[from] std::str::Utf8Error ),
 }
 
-pub(in super::super) type SocketMap<T> = HashMap<InterfaceId, Vec<T>> ;
+pub(in super::super) type SocketMap<T> = HashMap<InterfaceId, HashMap<PluginId, T> > ;
 
 pub fn build_socket_map( plugins: Vec<Plugin> ) -> ( SocketMap<Plugin>, Vec<PluginPreprocessorError> ) {
     
     let ( parsed, errors ): ( Vec<_>, Vec<_> ) = plugins
         .into_iter()
-        .map(| plugin | {
-            let plug_id = plugin.manifest().get_plug()?.get_id()?.to_string()?;
+        .map(| mut plugin | {
+            let plug_id = plugin.manifest().root().get_plug()?.get_id()?.to_string()?;
             Ok(( plug_id, plugin ))
         })
         .partition_result();
     
     (
-        parsed
-            .into_iter()
-            .fold( HashMap::new(), | mut acc, ( k, v )| {
-                acc.entry( k ).or_insert_with( Vec::new ).push( v );
-                acc
-            }),
+        parsed.into_iter().fold( HashMap::new(), | mut acc, ( plug_id, plugin )| {
+            acc.entry( plug_id )
+                .or_insert_with( HashMap::new )
+                .insert( plugin.id().to_owned(), plugin );
+            acc
+        }),
         errors
     )
 

@@ -1,11 +1,9 @@
 @0xbe052309f4b5a2e5 ;
 
+using Common = import "./common.capnp" ; 
+
 # Primitives
 struct PluginId {
-  id @0 : Text ;
-}
-
-struct InterfaceId {
   id @0 : Text ;
 }
 
@@ -27,7 +25,7 @@ enum InterfaceCardinality {
 # Basic Types
 
 struct Interface {
-  id @0 : InterfaceId ;
+  id @0 : Common.InterfaceId ;
   version @1 : Version ;
   cardinality @2 : InterfaceCardinality ;
 }
@@ -35,8 +33,8 @@ struct Interface {
 struct PluginMetadata {
   id @0 : PluginId ;
   version @1 : Version ;
-  plug @2 : InterfaceId ;
-  sockets @3 : List( InterfaceId );
+  plug @2 : Common.InterfaceId ;
+  sockets @3 : List( Common.InterfaceId );
   permissions @4 : List( Permission );
   # checksum @5 : Data ;
 }

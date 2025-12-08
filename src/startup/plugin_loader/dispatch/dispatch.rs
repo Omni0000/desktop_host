@@ -1,8 +1,8 @@
-
 use thiserror::Error ;
+use itertools::Itertools ;
 
-use super::super::{ LivePluginTree, PluginTreeNode };
-use super::super::preload_socket::InvalidSocket ;
+use crate::startup::InterfaceId ;
+use super::super::{ LivePluginTree };
 use super::FunctionDispatchInstruction ;
 use super::{ RawMemorySegment, WasmMemorySegment, MemoryReadError, MemorySendError };
 use super::WasmSendContext ;
@@ -10,7 +10,11 @@ use super::WasmSendContext ;
 
 
 #[derive( Error, Debug )]
+#[error( "Invalid Socket: '{0}'" )] pub struct InvalidSocketError( InterfaceId );
+
+#[derive( Error, Debug )]
 pub enum DispatchError {
+    #[error( "Deadlock" )] Deadlock,
     #[error( "Dispatch Failure: {0}" )] DispatchFailure( #[from] wasmtime::Error ),
     #[error( "Memory Read Error: {0}" )] MemoryReadError( #[from] MemoryReadError ),
     #[error( "Memory Write Error: {0}" )] MemoryWriteError( #[from] MemorySendError ),
@@ -19,28 +23,32 @@ pub enum DispatchError {
 impl LivePluginTree {
 
     pub fn dispatch_function<'a>(
-        &'a mut self,
+        &'a self,
         instruction: FunctionDispatchInstruction,
         params: &[u8],
     ) -> Result<(
         Vec<Result< Vec<u8>, DispatchError >>,
         Vec<wasmtime::Error>
-    ), InvalidSocket > {
+    ), InvalidSocketError > {
         
-        let preload_errors = self.preload_socket( &instruction.socket )?;
-        
-        let results = self.socket_map.get_mut( &instruction.socket )
-            .ok_or( InvalidSocket( instruction.socket.clone()) )?
+        Ok( self.socket_map.get( &instruction.socket )
+            .ok_or( InvalidSocketError( instruction.socket.clone()) )?
             .into_iter()
-            .filter_map(| plugin |
-                if let PluginTreeNode::ActivePlugin( active_plugin) = plugin {
-                    Some( dispatch_function_of( active_plugin, &instruction.function, params ))
-                } else { None }
-            )
-            .collect();
+            .map(|( _, rw_plugin )| {
 
+                let mut plugin_lock = match rw_plugin.write() {
+                   Ok( lock ) => lock,
+                   _ => return Ok( Err( DispatchError::Deadlock )), 
+                };
 
-        Ok(( results, preload_errors ))
+                let active_plugin = plugin_lock.load( &self.engine, &self.linker )?;
+
+                Ok( dispatch_function_of( active_plugin, &instruction.function, params ))
+
+            })
+            .partition_result()
+        )
+
     }
 
 }

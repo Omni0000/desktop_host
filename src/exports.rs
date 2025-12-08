@@ -2,7 +2,7 @@ use wasmtime::{ Engine, Linker};
 
 use crate::startup::Plugin;
 
-mod test_exports ;
+mod test ;
 
 
 
@@ -25,8 +25,8 @@ pub fn exports( engine: &Engine ) -> ( Linker<Plugin>, Vec<wasmtime::Error> ) {
 
     let mut linker = Linker::new( &engine );
     let linker_errors = declare_exports!( linker, [
-        ( "env", "add_one", test_exports::add_one ),
-        ( "env", "print_to_host", test_exports::print_to_host ),
+        ( "env", "add_one", test::add_one ),
+        ( "env", "print_to_host", test::print_to_host ),
     ]);
 
     ( linker, linker_errors )

@@ -1,4 +1,5 @@
 use std::collections::HashMap ;
+use std::sync::RwLock ;
 use wasmtime::{ Engine, Linker };
 
 use crate::startup::Plugin ; 
@@ -7,7 +8,7 @@ use super::ActivePlugin ;
 
 pub struct LivePluginTree {
     pub(super) engine: Engine,
-    pub(super) socket_map: SocketMap<PluginTreeNode>,
+    pub(super) socket_map: SocketMap<RwLock<PluginTreeNode>>,
     pub(super) linker: Linker<Plugin>,
 }
 
@@ -30,16 +31,19 @@ pub enum PluginTreeNode {
     LazyPlugin( Plugin ),
 }
 
-impl From<Plugin> for PluginTreeNode {
-    fn from( plugin: Plugin ) -> Self { Self::LazyPlugin( plugin ) }
+impl From<Plugin> for RwLock<PluginTreeNode> {
+    fn from( plugin: Plugin ) -> Self { RwLock::new( PluginTreeNode::LazyPlugin( plugin ))}
 }
 
-#[inline] fn map_socket_map( socket_map: SocketMap<Plugin> ) -> SocketMap<PluginTreeNode> {
+#[inline] fn map_socket_map( socket_map: SocketMap<Plugin> ) -> SocketMap<RwLock<PluginTreeNode>> {
     socket_map
         .into_iter()
-        .map(|( key, plugins_vec )| (
+        .map(|( key, plugins_map )| (
             key,
-            plugins_vec.into_iter().map( PluginTreeNode::from ).collect(),
+            plugins_map
+                .into_iter()
+                .map(|( plugin_id, plugin )| ( plugin_id, RwLock::<PluginTreeNode>::from( plugin ) ))
+                .collect(),
         ))
         .collect::<HashMap<_, _>>()
 }
