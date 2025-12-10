@@ -6,7 +6,8 @@ mod plugin_loader ;
 
 pub use plugin_deserialiser::{ Plugin, InterfaceId };
 pub use plugin_loader::{ LivePluginTree, FunctionDispatchInstruction, DispatchError };
-pub use plugin_loader::{ WasmMemorySegment, WasmSendContext, WasmMemSegPtr, WasmMemSegSize, RawMemorySegment };
+pub use plugin_loader::{ WasmMemorySegment, WasmSendContext, RawMemorySegment, WasmMemSegPtr, WasmMemSegSize };
+pub use plugin_loader::{ MemoryReadError, MemorySendError };
 use plugin_preprocessor::build_socket_map ;
 
 use wasmtime::Engine ;

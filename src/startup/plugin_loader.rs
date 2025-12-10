@@ -6,4 +6,5 @@ mod dispatch ;
 pub use active_plugin::ActivePlugin ;
 pub use live_plugin_tree::{ LivePluginTree, PluginTreeNode };
 pub use dispatch::{ FunctionDispatchInstruction, DispatchError };
-pub use dispatch::{ WasmMemorySegment, WasmSendContext, WasmMemSegPtr, WasmMemSegSize, RawMemorySegment };
+pub use dispatch::{ WasmMemorySegment, WasmSendContext, RawMemorySegment, WasmMemSegPtr, WasmMemSegSize };
+pub use dispatch::{ MemoryReadError, MemorySendError };

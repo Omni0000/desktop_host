@@ -58,4 +58,20 @@ fn main() {
         Err( e ) => eprintln!( "{}", e )
     }
 
+    match LIVE_PLUGIN_TREE.dispatch_function(
+        FunctionDispatchInstruction::new( "00000000".to_string(), "call_into_b".to_string() ),
+        &[],
+    ) {
+        Ok(( results, errors )) => {
+            if errors.len() > 0 { eprintln!( "{:?}", errors );}
+            for result in results {
+                match result {
+                    Ok( res ) => println!( "res: {:?}", res ),
+                    Err( e ) => eprintln!( "fail: {}", e ),
+                }
+            }
+        },
+        Err( e ) => eprintln!( "{}", e )
+    }
+
 }

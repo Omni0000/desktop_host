@@ -19,4 +19,5 @@ fn main() {
     println!( "{}", std::env::var( "OUT_DIR" ).unwrap() );
     capnp_compile!( "common.capnp" );
     capnp_compile!( "manifest.capnp" );
+    capnp_compile!( "exports/bridge.capnp" );
 }

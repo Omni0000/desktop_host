@@ -8,29 +8,49 @@ use super::{ RawMemorySegment, WasmMemSegPtr, WasmMemSegSize, WasmMemorySegment 
 
 #[derive( Error, Debug )]
 pub enum MemorySendError {
-    #[error("")] AllocError( #[from] __AllocError ),
-    #[error("")] MissingMemoryExport( String ),
-    #[error("")] MemoryAccessError( #[from] MemoryAccessError ),
+    #[error( "No Or Invalid Alloc Export: {0}" )] NoOrInvalidAllocExport( wasmtime::Error ),
+    #[error( "Plugin Alloc Exception: {0}" )] PluginAllocException( wasmtime::Error ),
+    #[error( "Data Too Large: {0}" )] DataTooLarge( #[from] std::num::TryFromIntError ),
+    #[error( "Missing Memory Export: '{0}'" )] MissingMemoryExport( String ),
+    #[error( "Out Of Bounds Memory: {0}" )] OutOfBoundsMemory( #[from] MemoryAccessError ),
 }
 
 #[derive( Error, Debug )]
 pub enum __AllocError {
-    #[error( "NoOrInvalidAllocExport: {0}" )] NoOrInvalidAllocExport( wasmtime::Error ),
+    #[error( "No Or Invalid Alloc Export: {0}" )] NoOrInvalidAllocExport( wasmtime::Error ),
     #[error( "Plugin Exception: {0}" )] PluginException( wasmtime::Error ),
     #[error( "Data Too Large: {0}" )] DataTooLarge( #[from] std::num::TryFromIntError ),
+}
+impl From<__AllocError> for MemorySendError {
+    fn from( error: __AllocError ) -> Self {
+        match error {
+            __AllocError::NoOrInvalidAllocExport( err ) => Self::NoOrInvalidAllocExport( err ),
+            __AllocError::PluginException( err ) => Self::PluginAllocException( err ),
+            __AllocError::DataTooLarge( err ) => Self::DataTooLarge( err ),
+        }
+    }
 }
 
 #[derive( Error, Debug )]
 pub enum MemoryReadError {
-    #[error("")] DeallocError( #[from] __DeallocError ),
-    #[error("")] MissingMemoryExport( String ),
-    #[error("")] MemoryAccessError( #[from] MemoryAccessError ),
+    #[error( "No Or Invalid Dealloc Export: {0}" )] NoOrInvalidDeallocExport( wasmtime::Error ),
+    #[error( "Plugin Dealloc Exception: {0}" )] PluginDeallocException( wasmtime::Error ),
+    #[error( "Missing MemoryExport: '{0}'" )] MissingMemoryExport( String ),
+    #[error( "Out Of Bounds Memory: {0}" )] OutOfBoundsMemory( #[from] MemoryAccessError ),
 }
 
 #[derive( Error, Debug )]
 pub enum __DeallocError {
     #[error( "NoOrInvalidDeallocExport: {0}" )] NoOrInvalidDeallocExport( wasmtime::Error ),
     #[error( "Plugin Exception: {0}" )] PluginException( wasmtime::Error ),
+}
+impl From<__DeallocError> for MemoryReadError {
+    fn from( error: __DeallocError ) -> Self {
+        match error {
+            __DeallocError::NoOrInvalidDeallocExport( err ) => Self::NoOrInvalidDeallocExport( err ),
+            __DeallocError::PluginException( err ) => Self::PluginDeallocException( err ),
+        }
+    }
 }
 
 pub trait WasmSendContext {

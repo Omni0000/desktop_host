@@ -15,7 +15,8 @@ use super::WasmSendContext ;
 #[derive( Error, Debug )]
 pub enum DispatchError {
     #[error( "Deadlock" )] Deadlock,
-    #[error( "Dispatch Failure: {0}" )] DispatchFailure( #[from] wasmtime::Error ),
+    #[error( "No Or Invalid Signature: {0}" )] NoOrInvalidSignature( wasmtime::Error ),
+    #[error( "Dispatch Exception: {0}" )] DispatchException( wasmtime::Error ),
     #[error( "Memory Read Error: {0}" )] MemoryReadError( #[from] MemoryReadError ),
     #[error( "Memory Write Error: {0}" )] MemoryWriteError( #[from] MemorySendError ),
 }
@@ -57,8 +58,10 @@ pub(in super::super) fn dispatch_function_of( plugin: &mut impl WasmSendContext,
 
     let params_memory_segment: WasmMemorySegment = plugin.send_data( &data )?;
     let response_memory_segment: RawMemorySegment = plugin
-        .get_typed_func( function )?
-        .call( &mut plugin.context_mut(), params_memory_segment.as_send() )?;
+        .get_typed_func( function )
+        .map_err(| err | DispatchError::NoOrInvalidSignature( err ))?
+        .call( &mut plugin.context_mut(), params_memory_segment.as_send() )
+        .map_err(| err | DispatchError::DispatchException( err ))?;
     Ok( plugin.read_data( response_memory_segment )? )
 
 }
