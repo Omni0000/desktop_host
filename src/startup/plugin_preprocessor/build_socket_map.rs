@@ -19,7 +19,7 @@ pub fn build_socket_map( plugins: Vec<Plugin> ) -> ( SocketMap<Plugin>, Vec<Plug
     let ( parsed, errors ): ( Vec<_>, Vec<_> ) = plugins
         .into_iter()
         .map(| mut plugin | {
-            let plug_id = plugin.manifest().root().get_plug()?.get_id()?.to_string()?;
+            let plug_id = plugin.manifest().root().get_plug()?.get_id();
             Ok(( plug_id, plugin ))
         })
         .partition_result();

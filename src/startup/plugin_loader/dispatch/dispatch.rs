@@ -3,7 +3,6 @@ use itertools::Itertools ;
 
 use crate::startup::InterfaceId ;
 use super::super::{ LivePluginTree };
-use super::FunctionDispatchInstruction ;
 use super::{ RawMemorySegment, WasmMemorySegment, MemoryReadError, MemorySendError };
 use super::WasmSendContext ;
 
@@ -25,15 +24,16 @@ impl LivePluginTree {
 
     pub fn dispatch_function<'a>(
         &'a self,
-        instruction: FunctionDispatchInstruction,
+        socket: &InterfaceId,
+        function: &str,
         params: &[u8],
     ) -> Result<(
         Vec<Result< Vec<u8>, DispatchError >>,
         Vec<wasmtime::Error>
     ), InvalidSocketError > {
         
-        Ok( self.socket_map.get( &instruction.socket )
-            .ok_or( InvalidSocketError( instruction.socket.clone()) )?
+        Ok( self.socket_map.get( socket )
+            .ok_or( InvalidSocketError( socket.clone()) )?
             .into_iter()
             .map(|( _, rw_plugin )| {
 
@@ -44,7 +44,7 @@ impl LivePluginTree {
 
                 let active_plugin = plugin_lock.load( &self.engine, &self.linker )?;
 
-                Ok( dispatch_function_of( active_plugin, &instruction.function, params ))
+                Ok( dispatch_function_of( active_plugin, function, params ))
 
             })
             .partition_result()
@@ -54,7 +54,7 @@ impl LivePluginTree {
 
 }
 
-pub(in super::super) fn dispatch_function_of( plugin: &mut impl WasmSendContext, function: &String, data: &[u8] ) -> Result< Vec<u8>, DispatchError > {
+pub(in super::super) fn dispatch_function_of( plugin: &mut impl WasmSendContext, function: &str, data: &[u8] ) -> Result< Vec<u8>, DispatchError > {
 
     let params_memory_segment: WasmMemorySegment = plugin.send_data( &data )?;
     let response_memory_segment: RawMemorySegment = plugin

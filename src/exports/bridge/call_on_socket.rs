@@ -3,9 +3,9 @@ use capnp::message::{ self, HeapAllocator, ReaderOptions };
 use capnp::serialize ;
 use wasmtime::Caller ;
 
-use crate::startup::{ Plugin, RawMemorySegment, WasmMemSegPtr, WasmMemSegSize, WasmSendContext };
-use crate::startup::{ DispatchError, FunctionDispatchInstruction };
-use crate::startup::{ MemoryReadError, MemorySendError };
+use crate::startup::{ InterfaceId, Plugin };
+use crate::startup::{ RawMemorySegment, WasmMemSegPtr, WasmMemSegSize, WasmSendContext };
+use crate::startup::{ DispatchError, MemoryReadError, MemorySendError };
 use crate::capnp::exports::bridge_capnp::{ function_call_instruction, function_call_result, FunctionCallError };
 use crate::{ LIVE_PLUGIN_TREE, extract_wasm_args };
 
@@ -24,7 +24,7 @@ pub(in crate::exports) fn call_on_socket(
         let args = extract_wasm_args!( &mut caller, args_ptr, args_size )
             .map_err(| _ | FunctionCallError::InvalidArgsMemorySegment )?;
 
-        let ( results, load_errors ) = LIVE_PLUGIN_TREE.dispatch_function( instruction, &args )
+        let ( results, load_errors ) = LIVE_PLUGIN_TREE.dispatch_function( &instruction.0, &instruction.1, &args )
             .map_err(|_| FunctionCallError::InvalidSocket )?;
 
         load_errors.iter().for_each(| err | crate::utils::produce_warning( err ));
@@ -41,7 +41,7 @@ pub(in crate::exports) fn call_on_socket(
     caller: &mut Caller<Plugin>,
     ptr: WasmMemSegPtr,
     size: WasmMemSegSize,
-) -> Result<FunctionDispatchInstruction, FunctionCallError> {
+) -> Result<( InterfaceId, String ), FunctionCallError> {
 
     let instruction_bytes = extract_wasm_args!( caller, ptr, size )
         .map_err(| _ | FunctionCallError::InvalidInstructionMemorySegment )?;
@@ -52,13 +52,12 @@ pub(in crate::exports) fn call_on_socket(
     
     let instruction_socket = instruction_data.get_socket()
         .map_err(| _ | FunctionCallError::InvalidInstructionData )?
-        .get_id().map_err(| _ | FunctionCallError::InvalidInstructionData )?
-        .to_string().map_err(| _ | FunctionCallError::InvalidInstructionData )?;
+        .get_id();
     let instruction_function = instruction_data.get_function()
         .map_err(| _ | FunctionCallError::InvalidInstructionData )?
         .to_string().map_err(| _ | FunctionCallError::InvalidInstructionData )?;
 
-    Ok( FunctionDispatchInstruction::new( instruction_socket, instruction_function ) )
+    Ok(( instruction_socket, instruction_function ))
 
 }
 
