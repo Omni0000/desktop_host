@@ -1,36 +1,27 @@
 mod capnp ;
 mod utils ;
-mod startup ;
+mod initialisation ;
 mod exports ;
 
 use std::sync::Arc ;
-use lazy_static::lazy_static ;
 
-use startup::InterfaceId;
-use startup::{ startup, LivePluginTree };
-
-
-
-
-lazy_static! {
-    static ref LIVE_PLUGIN_TREE: Arc<LivePluginTree> = {
-        match startup() {
-            Ok( live_plugin_tree ) => Arc::new( live_plugin_tree ),
-            Err( err ) => panic!( "Startup Error: {}", err ),
-        }
-    };
-}
+use initialisation::InterfaceId;
+use initialisation::initialise_plugin_tree ;
+pub use initialisation::PluginData ;
 
 
 
-const ROOT_SOCKET_ID: &'static InterfaceId = &0x_00_00_00_00_u64 ;
-const STARTUP_FUNCTION: &'static str = "startup" ;
+const ROOT_SOCKET_ID: &InterfaceId = &0x_00_00_00_00_u64 ;
+const ROOT_SOCKET_INTERFACE: &str = "root:startup/root" ;
+const STARTUP_FUNCTION: &str = "startup" ;
 
 fn main() {
 
-    match LIVE_PLUGIN_TREE.dispatch_function( ROOT_SOCKET_ID, STARTUP_FUNCTION, &[] ) {
-        Ok( res ) => println!( "res: {:#?}", res ),
-        Err( err ) => eprintln!( "Error: {}", err ),
+    let plugin_tree = match initialise_plugin_tree() {
+        Ok( live_plugin_tree ) => Arc::new( live_plugin_tree ),
+        Err( err ) => panic!( "Unrecoverable Startup Error: {}", err ),
     };
+
+    println!( "{:#?}", plugin_tree.dispatch_on_root( ROOT_SOCKET_INTERFACE, STARTUP_FUNCTION, &[] ));
 
 }

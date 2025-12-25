@@ -1,8 +1,7 @@
-use wasmtime::{ Engine, Linker };
+use wasmtime::Engine ;
+use wasmtime::component::Linker ;
 
-use crate::startup::Plugin;
-
-mod bridge ;
+use crate::initialisation::PluginContext ;
 
 
 
@@ -21,11 +20,11 @@ macro_rules! declare_exports {
     };
 }
 
-pub fn exports( engine: &Engine ) -> ( Linker<Plugin>, Vec<wasmtime::Error> ) {
+pub fn exports( engine: &Engine ) -> ( Linker<PluginContext>, Vec<wasmtime::Error> ) {
 
     let mut linker = Linker::new( &engine );
+    wasmtime_wasi::p2::add_to_linker_sync( &mut linker ).expect( "TEMP: wasi p2 linking failure" );
     let linker_errors = declare_exports!( linker, [
-        ( "call_on_socket", bridge::call_on_socket ),
     ]);
 
     ( linker, linker_errors )
