@@ -22,8 +22,7 @@ macro_rules! declare_exports {
 
 pub fn exports( engine: &Engine ) -> ( Linker<PluginContext>, Vec<wasmtime::Error> ) {
 
-    let mut linker = Linker::new( &engine );
-    wasmtime_wasi::p2::add_to_linker_sync( &mut linker ).expect( "TEMP: wasi p2 linking failure" );
+    let linker = Linker::new( &engine );
     let linker_errors = declare_exports!( linker, [
     ]);
 

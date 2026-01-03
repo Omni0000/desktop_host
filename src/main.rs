@@ -22,6 +22,6 @@ fn main() {
         Err( err ) => panic!( "Unrecoverable Startup Error: {}", err ),
     };
 
-    println!( "{:#?}", plugin_tree.dispatch_on_root( ROOT_SOCKET_INTERFACE, STARTUP_FUNCTION, &[] ));
+    let _ = plugin_tree.dispatch_on_root( ROOT_SOCKET_INTERFACE, STARTUP_FUNCTION, &[] );
 
 }

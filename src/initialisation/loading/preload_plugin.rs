@@ -110,7 +110,6 @@ use super::Socket ;
         instance
             .func_new( &function, move | _ctx, _ty, args, results | {
                 results[0] = socket_arc_clone.dispatch_into_val( &interface_ident_clone, &interface_arc_clone, &function_clone, args );
-                println!( "result: {:?}", results[0] );
                 Ok(())
             })
             .map_err(| err | PluginPreloadError::FailedToLinkFunction( function.to_string(), err ))
