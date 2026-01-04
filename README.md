@@ -8,33 +8,29 @@ Omni is a platform for building fully modular applications based around [WebAsse
 
 ## Quick Start
 
-Requires [Rust](https://www.rust-lang.org/) and [Cap'n Proto](https://capnproto.org/).
-
 ### Using Nix (Recommended)
 
-If you have Nix installed, please use the provided `shell.nix` to set up everything you need:
+If you have Nix installed, please use the provided `flake.nix` to set up everything you need:
 
 ```bash
-nix-shell
+nix develop
 ```
 
 ### Manual Setup
 
-Just install Cargo an Cap'n Proto I guess, you can figure it out.
+Running this project will require installing the following:
 
-## Features
+- [Rust toolchain](https://www.rust-lang.org/learn/get-started/)
+- [Cap'n Proto](https://capnproto.org/install.html).
 
-- Modular plugin architecture for composable apps.
-- [WebAssembly](https://webassembly.org/) isolation for security.
-- Tree-like plugin dependencies.
-- Fine-grained permission management.
+## Technical Details
 
-## Plugin System
-
-Plugins connect via abstract interfaces defined in the [WIT](https://github.com/WebAssembly/component-model/blob/main/design/mvp/WIT.md) format. These are not tied to any specific plugin, instead, each plugin defines a 'plug' pointing to an interface it implements, and optionally, a list of 'sockets', pointing to interfaces it expects to call into.
-
-## Design Rationale
+### Design Rationale
 
 - **WebAssembly**: Easy language-agnostic low-overhead sandboxing.
 - **WIT**: Standardized [IDL](https://en.wikipedia.org/wiki/Interface_description_language) designed for the WebAssembly Component Model.
 - **Cap'n Proto**: Provides efficient, zero-copy serialization ideal for network transmission and storing of plugin manifests.
+
+### Plugin System
+
+Plugins connect via abstract interfaces defined in the [WIT](https://github.com/WebAssembly/component-model/blob/main/design/mvp/WIT.md) format. These are not tied to any specific plugin, instead, each plugin defines a 'plug' pointing to an interface it implements, and optionally, a list of 'sockets', pointing to interfaces it expects to call into.
