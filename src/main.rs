@@ -5,7 +5,7 @@ mod exports ;
 
 use std::sync::Arc ;
 
-use initialisation::InterfaceId;
+use initialisation::{ InterfaceId, PluginId };
 use initialisation::initialise_plugin_tree ;
 pub use initialisation::PluginData ;
 
@@ -22,6 +22,7 @@ fn main() {
         Err( err ) => panic!( "Unrecoverable Startup Error: {}", err ),
     };
 
-    let _ = plugin_tree.dispatch_on_root( ROOT_SOCKET_INTERFACE, STARTUP_FUNCTION, &[] );
+    let result = plugin_tree.dispatch_function_on_root( ROOT_SOCKET_INTERFACE, STARTUP_FUNCTION, false, &[] );
+    println!( "{result:#?}" );
 
 }

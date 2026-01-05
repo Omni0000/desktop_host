@@ -8,14 +8,14 @@ mod types ;
 pub use types::{ PluginId, InterfaceId };
 pub use discovery::{ RawPluginData as PluginData };
 pub use loading::{ PluginTree, PluginContext };
-use discovery::{ RawPluginData, RawInterfaceData, InterfaceCardinality };
+use discovery::{ RawPluginData, RawInterfaceData, InterfaceCardinality, FunctionData, FunctionReturnType, ManifestReadError, InterfaceParseError };
 
 
 
 #[derive( Error, Debug )]
 pub enum UnrecoverableStartupError {
     #[error( "Discovery Failure: {0}" )] DiscoveryError( #[from] discovery::DiscoveryFailure ),
-    #[error( "Plugin Preload Error: {0}" )] PluginPreloadError( #[from] loading::PluginPreloadError ),
+    #[error( "Plugin Preload Error: {0}" )] PluginPreloadError( #[from] loading::PreloadError ),
 }
 
 pub fn initialise_plugin_tree() -> Result<PluginTree, UnrecoverableStartupError> {

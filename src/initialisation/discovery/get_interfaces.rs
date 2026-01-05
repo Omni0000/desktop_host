@@ -28,7 +28,7 @@ pub(super) fn try_get_all_interfaces_from_cache( interfaces_ids: HashSet<Interfa
     Vec<( InterfaceId, DiscoveryError )>
 ) {
     interfaces_ids.into_iter()
-        .map(| id | RawInterfaceData::new(id).map_err(| err | ( id, err )))
+        .map(| id | RawInterfaceData::new( id ).map_err(| err | ( id, err )))
         .partition_result::<Vec<_>, Vec<_>, _, _ >()
 }
 

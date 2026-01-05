@@ -1,7 +1,7 @@
 use wasmtime::component::ResourceTable ;
 use wasmtime_wasi::{ WasiCtx, WasiCtxView, WasiView };
 
-use super::super::RawPluginData ;
+use super::RawPluginData ;
 
 
 

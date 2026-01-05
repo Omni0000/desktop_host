@@ -4,18 +4,14 @@ use thiserror::Error ;
 use wasmtime::Engine;
 use wasmtime::component::Linker ;
 
-use super::super::discovery::{ RawInterfaceData, RawPluginData, ManifestReadError };
-use super::super::InterfaceId ; 
-use super::super::InterfaceCardinality ;
-use super::plugin_tree::Socket ;
-use super::plugin_instance::PluginInstance ;
-use super::preload_socket::{ preload_socket, SocketState };
-use super::plugin_context::PluginContext ;
+use crate::InterfaceId ; 
+use super::{ RawInterfaceData, RawPluginData, InterfaceCardinality, ManifestReadError };
+use super::{ Socket, PluginInstance, PluginContext, preload_socket, SocketState };
 
 
 
 #[derive( Error, Debug )]
-pub enum PluginPreloadError {
+pub enum PreloadError {
     
     #[error( "Invalid socket: {0}" )]
     InvalidSocket( InterfaceId ),
@@ -36,7 +32,7 @@ pub enum PluginPreloadError {
     FailedToLinkRootInterface( wasmtime::Error ),
 
     #[error( "Failed to link function '{0}': {1}" )]
-    FailedToLinkFunction( String, wasmtime::Error ),
+    FailedToLink( String, wasmtime::Error ),
 
     #[error( "Handled failure" )]
     AlreadyHandled,
@@ -46,8 +42,8 @@ pub enum PluginPreloadError {
 #[derive(Debug)]
 pub(super) struct PreloadResult<T> {
     pub socket_map: HashMap<InterfaceId, SocketState>,
-    pub result: Result<T, PluginPreloadError>,
-    pub errors: Vec<PluginPreloadError>,
+    pub result: Result<T, PreloadError>,
+    pub errors: Vec<PreloadError>,
 }
 
 #[inline] pub(super) fn preload_plugin_tree(
@@ -58,10 +54,10 @@ pub(super) struct PreloadResult<T> {
 ) -> Result<(
     Arc<RawInterfaceData>,
     Arc<Socket<RwLock<PluginInstance>>>,
-    Vec<PluginPreloadError>,
+    Vec<PreloadError>,
 ), (
-    PluginPreloadError,
-    Vec<PluginPreloadError>,
+    PreloadError,
+    Vec<PreloadError>,
 )> {
 
     match preload_socket(
