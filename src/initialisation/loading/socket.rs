@@ -35,17 +35,6 @@ impl<T> Socket<T> {
         }
     }
 }
-impl Socket<PluginInstance> {
-    pub fn get( &self, id: &PluginId ) -> Option<&PluginInstance> {
-        match self {
-            Self::AtMostOne( Some( plugin )) if plugin.id() == id => Some( plugin ),
-            Self::AtMostOne( Option::None ) | Self::AtMostOne( _ ) => None,
-            Self::ExactlyOne( plugin ) if plugin.id() == id => Some( plugin ),
-            Self::ExactlyOne( _ ) => None,
-            Self::AtLeastOne( plugins ) | Self::Any( plugins ) => plugins.get( id ),
-        }
-    }
-}
 impl Socket<RwLock<PluginInstance>> {
     pub fn get( &self, id: &PluginId ) -> Result<Option<&RwLock<PluginInstance>>,PoisonError<RwLockReadGuard<'_, PluginInstance>>> {
         Ok( match self {
