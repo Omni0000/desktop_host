@@ -1,9 +1,13 @@
 use std::path::{ PathBuf, Path };
 use std::collections::HashMap ;
+use std::io::Cursor ;
 use thiserror::Error ;
-use wit_parser::{ Function, FunctionKind, Resolve, Type, TypeDef, TypeDefKind, TypeId };
+use wit_parser::{ Function, FunctionKind, Resolve, Type, TypeDefKind, TypeId };
+use capnp::{ serialize, message::ReaderOptions };
 
 use crate::initialisation::InterfaceId ;
+use crate::capnp::common::interface_capnp ;
+use crate::capnp::manifest::interface_manifest_capnp::interface_manifest ;
 use super::{ DiscoveryError, INTERFACES_DIR };
 
 
@@ -11,8 +15,8 @@ use super::{ DiscoveryError, INTERFACES_DIR };
 #[derive( Debug )]
 pub struct RawInterfaceData {
     id: InterfaceId,
+    manifest_data: Vec<u8>,
     wit_data: InterfaceWitData,
-    cardinality: InterfaceCardinality,
 }
 
 #[derive( Debug )]
@@ -70,31 +74,40 @@ pub enum InterfaceParseError {
     #[error( "Undeclared type: {0:?}" )] UndeclaredType( TypeId ),
 }
 
+#[derive( Error, Debug )]
+pub enum InterfaceManifestReadError {
+    #[error( "IO error: {0}" )] Io( #[from] std::io::Error ),
+    #[error( "Capnp error: {0}" )] Capnp( #[from] capnp::Error ),
+    #[error( "Invalid manifest" )] InvalidManifest,
+}
+
 impl RawInterfaceData {
 
     pub fn new( id: InterfaceId ) -> Result<Self, DiscoveryError> {
         let root_path = Self::root_path( id );
         if Self::is_complete( &root_path ) { Ok( Self {
             id,
+            manifest_data: Self::get_manifest_data( &root_path ).map_err(|err| DiscoveryError::FailedToParseInterface( id, err ))?,
             wit_data: Self::parse_wit( &root_path ).map_err(| err | DiscoveryError::FailedToParseInterface( id, err ))?,
-            cardinality: Self::parse_cardinality( &root_path ).map_err(| err | DiscoveryError::FailedToParseInterface( id, err ))?,
         }) } else { Err( DiscoveryError::InterfaceNotInCache( id ))}
     }
 
     #[inline] fn root_path( id: InterfaceId ) -> PathBuf { PathBuf::from( INTERFACES_DIR ).join( format!( "{}", id ) )}
-    #[inline] fn is_complete( root_path: &PathBuf ) -> bool { Self::wit_path( root_path ).is_file() }
+    #[inline] fn is_complete( root_path: &PathBuf ) -> bool {
+        Self::wit_path(root_path).is_file()
+        && Self::manifest_path(root_path).is_file()
+    }
+    #[inline] fn manifest_path(root_path: &PathBuf) -> PathBuf { root_path.join( "manifest.bin" )}
     #[inline] fn wit_path( root_path: &PathBuf ) -> PathBuf { root_path.join( "root.wit" )}
 
     #[inline] pub fn id( &self ) -> &InterfaceId { &self.id }
-
-    #[inline] pub fn get_cardinality( &self ) -> &InterfaceCardinality { &self.cardinality }
 
     #[inline] pub fn get_package( &self ) -> &String { &self.wit_data.package }
     #[inline] pub fn get_functions( &self ) -> Vec<&FunctionData> { self.wit_data.functions.values().collect() }
     #[inline] pub fn get_resources( &self ) -> &Vec<String> { &self.wit_data.resources }
 
-    #[inline] fn parse_cardinality( _root_path: &PathBuf ) -> Result<InterfaceCardinality, InterfaceParseError> {
-        Ok( InterfaceCardinality::ExactlyOne )
+    #[inline] fn get_manifest_data( root_path: &PathBuf ) -> Result<Vec<u8>, InterfaceParseError> {
+        std::fs::read( Self::manifest_path( &root_path )).map_err( InterfaceParseError::Io )
     }
 
     #[inline] fn parse_wit( root_path: &PathBuf ) -> Result<InterfaceWitData, InterfaceParseError> {
@@ -129,6 +142,27 @@ impl RawInterfaceData {
         Ok( InterfaceWitData { package, functions, resources })
 
     }
+
+    #[inline( always )] pub fn get_cardinality( &self ) -> Result<InterfaceCardinality, InterfaceManifestReadError> {
+
+        let reader = serialize::read_message( Cursor::new( &self.manifest_data ), ReaderOptions::new() )
+            .map_err( InterfaceManifestReadError::Capnp )?;
+        let root = reader.get_root::<interface_manifest::Reader>()
+            .map_err( InterfaceManifestReadError::Capnp )?;
+
+        let cardinality = root
+            .get_cardinality()
+            .map_err(|_| InterfaceManifestReadError::InvalidManifest )?;
+
+        Ok( match cardinality {
+            interface_capnp::InterfaceCardinality::One => InterfaceCardinality::ExactlyOne,
+            interface_capnp::InterfaceCardinality::Many => InterfaceCardinality::Any,
+            interface_capnp::InterfaceCardinality::AtMostOne => InterfaceCardinality::AtMostOne,
+            interface_capnp::InterfaceCardinality::AtLeastOne => InterfaceCardinality::AtLeastOne,
+        })
+
+    }
+
 }
 
 #[inline] fn parse_return_type( resolve: &Resolve, result: Option<Type> ) -> Result<FunctionReturnType, InterfaceParseError> {

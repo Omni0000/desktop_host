@@ -1,5 +1,5 @@
 
-use crate::capnp::common_capnp::interface_id ;
+use crate::capnp::common::interface_capnp::interface_id ;
 
 
 

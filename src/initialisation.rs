@@ -8,7 +8,8 @@ mod types ;
 pub use types::{ PluginId, InterfaceId };
 pub use discovery::{ RawPluginData as PluginData };
 pub use loading::{ PluginTree, PluginContext };
-use discovery::{ RawPluginData, RawInterfaceData, InterfaceCardinality, FunctionData, FunctionReturnType, ManifestReadError, InterfaceParseError };
+use discovery::{ RawPluginData, RawInterfaceData, InterfaceCardinality,
+    FunctionData, FunctionReturnType, InterfaceManifestReadError, PluginManifestReadError, InterfaceParseError };
 
 
 

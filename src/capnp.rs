@@ -7,6 +7,14 @@ macro_rules! include_capnp {
         include_capnp! { @create_root_re_exports $parent_name ; $($child_items)* }
     };
 
+    ($parent_name:ident { $($child_items:tt)* } , $($rest:tt)*) => {
+        pub mod $parent_name {
+            include_capnp! { @inner_path_builder [$parent_name] $($child_items)* }
+        }
+        include_capnp! { @create_root_re_exports $parent_name ; $($child_items)* }
+        include_capnp! { $($rest)* }
+    };
+
     ($name:ident $(,)*) => {
         paste::paste! {
             pub mod [<$name _capnp>] {
@@ -64,9 +72,13 @@ macro_rules! include_capnp {
 }
 
 include_capnp! {
-    common,
-    manifest,
-    exports {
-        bridge,
+    common {
+        interface,
+        plugin,
+        version,
+    },
+    manifest {
+        interface_manifest,
+        plugin_manifest,
     },
 }

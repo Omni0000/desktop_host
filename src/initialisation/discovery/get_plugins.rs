@@ -45,12 +45,12 @@ fn get_used_interfaces( plugin: &mut RawPluginData ) -> Result<Vec<InterfaceId>,
 
     let plug = match plugin.get_plug() {
         Ok( data ) => data,
-        Err( err ) => return Err( DiscoveryError::FailedToReadManifest( plugin.id().clone(), err )),
+        Err( err ) => return Err( DiscoveryError::FailedToReadPluginManifest( plugin.id().clone(), err )),
     };
 
     let sockets = match plugin.get_sockets() {
         Ok( data ) => data,
-        Err( err ) => return Err( DiscoveryError::FailedToReadManifest( plugin.id().clone(), err )),
+        Err( err ) => return Err( DiscoveryError::FailedToReadPluginManifest( plugin.id().clone(), err )),
     };
     
     Ok( sockets.merge( plug ))

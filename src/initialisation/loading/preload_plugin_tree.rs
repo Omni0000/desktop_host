@@ -5,7 +5,7 @@ use wasmtime::Engine;
 use wasmtime::component::Linker ;
 
 use crate::InterfaceId ; 
-use super::{ RawInterfaceData, RawPluginData, InterfaceCardinality, ManifestReadError };
+use super::{ RawInterfaceData, RawPluginData, InterfaceCardinality, InterfaceManifestReadError, PluginManifestReadError };
 use super::{ Socket, PluginInstance, PluginContext, preload_socket, SocketState };
 
 
@@ -23,8 +23,11 @@ pub enum PreloadError {
     FailedCardinalityRequirements( InterfaceCardinality, usize ),
     
     #[error( "Corrupted plugin manifest: {0}" )]
-    CorruptedPluginManifest( ManifestReadError ),
+    CorruptedPluginManifest( PluginManifestReadError ),
     
+    #[error( "Corrupted interface manifest: {0}" )]
+    CorruptedInterfaceManifest( InterfaceManifestReadError ),
+
     #[error( "Failed to load component: {0}" )]
     FailedToLoadComponent( wasmtime::Error ),
 

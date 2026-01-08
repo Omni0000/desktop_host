@@ -17,6 +17,9 @@ macro_rules! capnp_compile {
 
 fn main() {
     println!( "{}", std::env::var( "OUT_DIR" ).unwrap() );
-    capnp_compile!( "common.capnp" );
-    capnp_compile!( "manifest.capnp" );
+    capnp_compile!( "common/interface.capnp" );
+    capnp_compile!( "common/plugin.capnp" );
+    capnp_compile!( "common/version.capnp" );
+    capnp_compile!( "manifest/interface_manifest.capnp" );
+    capnp_compile!( "manifest/plugin_manifest.capnp" );
 }

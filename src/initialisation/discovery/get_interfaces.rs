@@ -10,7 +10,7 @@ pub(super) fn try_into_socket_map( plugins: Vec<RawPluginData> ) -> ( HashMap<In
     let ( plugins, errors ) = plugins.into_iter()
         .map(| mut plugin | Ok((
             plugin.get_plug()
-                .map_err(| err | DiscoveryError::FailedToReadManifest( plugin.id().clone(), err ))?,
+                .map_err(| err | DiscoveryError::FailedToReadPluginManifest( plugin.id().clone(), err ))?,
             plugin
         )))
         .partition_result::<Vec<_>, Vec<_>, _, _>();

@@ -78,7 +78,10 @@ pub(super) fn preload_socket(
     default_linker: &Linker<PluginContext>,
 ) -> PreloadResult<( RawInterfaceData, Socket<PluginInstance> )> {
     
-    let cardinality = interface.get_cardinality();
+    let cardinality = match interface.get_cardinality() {
+        Ok( cardinality ) => cardinality,
+        Err( err ) => return PreloadResult { socket_map, result: Err( PreloadError::CorruptedInterfaceManifest( err )), errors: Vec::with_capacity( 0 ) },
+    };
     
     match cardinality {
         InterfaceCardinality::AtMostOne => preload_most_one( socket_map, engine, default_linker, plugins )

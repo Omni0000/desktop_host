@@ -3,7 +3,7 @@ use thiserror::Error ;
 
 use crate::utils::Merge ;
 use crate::initialisation::{ PluginId, InterfaceId };
-use super::{ RawPluginData, RawInterfaceData, ManifestReadError, InterfaceParseError,
+use super::{ RawPluginData, RawInterfaceData, PluginManifestReadError, InterfaceParseError,
     try_get_all_cached_plugins, try_download_plugins, try_get_used_interfaces,
     try_into_socket_map, try_get_all_interfaces_from_cache, try_download_all_interfaces
 };
@@ -35,7 +35,7 @@ pub enum DiscoveryError {
     FailedToParseInterface( InterfaceId, InterfaceParseError ),
 
     #[error( "Failed to read from plugin manifest of '{0}': {1}" )]
-    FailedToReadManifest( PluginId, ManifestReadError ),
+    FailedToReadPluginManifest( PluginId, PluginManifestReadError ),
 
 }
 

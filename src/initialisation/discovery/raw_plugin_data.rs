@@ -5,7 +5,7 @@ use capnp::serialize ;
 use thiserror::Error ;
 
 use crate::initialisation::{ PluginId, InterfaceId };
-use crate::capnp::manifest_capnp::plugin_metadata ;
+use crate::capnp::manifest::plugin_manifest_capnp::plugin_manifest ;
 use super::{ DiscoveryError, PLUGINS_DIR };
 
 
@@ -29,7 +29,7 @@ impl std::fmt::Debug for RawPluginData {
 }
 
 #[derive( Error, Debug )]
-pub enum ManifestReadError {
+pub enum PluginManifestReadError {
     #[error( "Io Error: {0}" )] IoError( #[from] std::io::Error ),
     #[error( "Capnp Error: {0}" )] CapnpError( #[from] capnp::Error ),
 }
@@ -59,17 +59,17 @@ impl RawPluginData {
     #[inline] pub fn wasm_path( &self ) -> PathBuf { Self::_wasm_path( &self.root_path )}
     #[inline] fn _wasm_path( root_path: &PathBuf ) -> PathBuf { root_path.join( "root.wasm" )}
 
-    #[inline] pub fn get_plug( &mut self ) -> Result<InterfaceId, ManifestReadError> {
+    #[inline] pub fn get_plug( &mut self ) -> Result<InterfaceId, PluginManifestReadError> {
         let manifest = self.get_manifest_data()?;
         let reader = serialize::read_message( Cursor::new( &manifest ), ReaderOptions::new())?;
-        let root = reader.get_root::<plugin_metadata::Reader>()?;
+        let root = reader.get_root::<plugin_manifest::Reader>()?;
         Ok( root.get_plug()?.get_id() )
     }
 
-    #[inline] pub fn get_sockets( &mut self ) -> Result<Vec<InterfaceId>, ManifestReadError> {
+    #[inline] pub fn get_sockets( &mut self ) -> Result<Vec<InterfaceId>, PluginManifestReadError> {
         let manifest = self.get_manifest_data()?;
         let reader = serialize::read_message( Cursor::new( &manifest ), ReaderOptions::new())?;
-        let root = reader.get_root::<plugin_metadata::Reader>()?;
+        let root = reader.get_root::<plugin_manifest::Reader>()?;
         Ok( root.get_sockets()?.into_iter().map( InterfaceId::from ).collect())
     }
 

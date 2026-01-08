@@ -1,5 +1,5 @@
-use super::{ RawInterfaceData, RawPluginData, ManifestReadError };
-use super::{ InterfaceCardinality, FunctionData, FunctionReturnType, InterfaceParseError };
+use super::{ RawInterfaceData, RawPluginData, PluginManifestReadError };
+use super::{ InterfaceCardinality, FunctionData, FunctionReturnType, InterfaceParseError, InterfaceManifestReadError };
 
 mod plugin_tree ;
 mod plugin_instance ;
