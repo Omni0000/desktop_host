@@ -1,11 +1,14 @@
+use std::path::PathBuf ;
 use std::collections::HashMap ;
 use thiserror::Error ;
 
 use crate::utils::Merge ;
 use crate::initialisation::{ PluginId, InterfaceId };
-use super::{ RawPluginData, RawInterfaceData, PluginManifestReadError, InterfaceParseError,
+use super::{
+    RawPluginData, RawInterfaceData, PluginManifestReadError, InterfaceParseError,
     try_get_all_cached_plugins, try_download_plugins, try_get_used_interfaces,
-    try_into_socket_map, try_get_all_interfaces_from_cache, try_download_all_interfaces
+    try_into_socket_map, try_get_all_interfaces_from_cache, try_download_all_interfaces,
+    PLUGINS_DIR, INTERFACES_DIR,
 };
 
 
@@ -41,17 +44,17 @@ pub enum DiscoveryError {
 
 #[derive( Error, Debug )]
 pub enum DiscoveryFailure {
-
+    #[error( "Io Error: {0}" )] Io( std::io::Error ),
 }
 
-pub fn discover_all() -> Result<(
+pub fn discover_all( source: &PathBuf ) -> Result<(
     HashMap<InterfaceId, ( RawInterfaceData, Vec<RawPluginData> )>,
     Vec<DiscoveryError>,
 ), DiscoveryFailure> {
 
-    let cached_plugin_ids = read_cache_header()?;
+    let cached_plugin_ids = read_cache_header( source )?;
 
-    let ( cached_plugins, missing_plugins ) = try_get_all_cached_plugins( cached_plugin_ids );
+    let ( cached_plugins, missing_plugins ) = try_get_all_cached_plugins( &source.join( PLUGINS_DIR ), cached_plugin_ids );
     let ( missing_plugin_ids, errors ) = missing_plugins.into_iter().unzip::<_, _, _, Vec<_>>();
 
     let ( downloaded_plugins, plugin_download_errors ) = try_download_plugins( missing_plugin_ids );
@@ -63,7 +66,7 @@ pub fn discover_all() -> Result<(
     let ( plugins, manifest_errors ) = try_into_socket_map( plugins );
     let errors = errors.merge_all( manifest_errors );
 
-    let ( cached_interfaces, missing_interfaces ) = try_get_all_interfaces_from_cache( used_interface_ids );
+    let ( cached_interfaces, missing_interfaces ) = try_get_all_interfaces_from_cache( &source.join( INTERFACES_DIR ), used_interface_ids );
     let ( missing_interface_ids, missing_interface_errors ) = missing_interfaces.into_iter().unzip::<_,_,_,Vec<_>>();
     let errors = errors.merge_all( missing_interface_errors );
 
@@ -76,11 +79,20 @@ pub fn discover_all() -> Result<(
 
 }
 
-fn read_cache_header() -> Result<Vec<PluginId>, DiscoveryFailure> {
-    Ok( vec![
-        "foo".to_string(),
-        "bar".to_string(),
-    ])
+fn read_cache_header( source: &PathBuf ) -> Result<Vec<PluginId>, DiscoveryFailure> {
+    if !cfg!( feature = "test" ) {
+        Ok( vec![
+            String::from( "foo" ),
+            String::from( "bar" ),
+        ])
+    } else {
+        Ok( std::fs::read_dir( source.join( PLUGINS_DIR )).map_err( DiscoveryFailure::Io )?
+            .map(| entry | entry.expect( "failed to read dir entry" ))
+            .filter(| entry | entry.file_type().expect( "failed to read dir entry file type" ).is_dir() )
+            .map(| entry | entry.file_name().into_string().expect( "dir name is not valid PluginId" ) )
+            .collect()
+        )
+    }
 }
 
 

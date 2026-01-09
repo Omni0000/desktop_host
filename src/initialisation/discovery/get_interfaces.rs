@@ -1,4 +1,5 @@
 use std::collections::{ HashSet, HashMap };
+use std::path::PathBuf ;
 use itertools::Itertools ;
 
 use crate::initialisation::InterfaceId ;
@@ -9,8 +10,7 @@ use super::{ DiscoveryError, RawPluginData, RawInterfaceData };
 pub(super) fn try_into_socket_map( plugins: Vec<RawPluginData> ) -> ( HashMap<InterfaceId, Vec<RawPluginData>>, Vec<DiscoveryError> ) {
     let ( plugins, errors ) = plugins.into_iter()
         .map(| mut plugin | Ok((
-            plugin.get_plug()
-                .map_err(| err | DiscoveryError::FailedToReadPluginManifest( plugin.id().clone(), err ))?,
+            plugin.get_plug().map_err(| err | DiscoveryError::FailedToReadPluginManifest( plugin.id().clone(), err ))?,
             plugin
         )))
         .partition_result::<Vec<_>, Vec<_>, _, _>();
@@ -23,12 +23,12 @@ pub(super) fn try_into_socket_map( plugins: Vec<RawPluginData> ) -> ( HashMap<In
     ( plugins, errors )
 }
 
-pub(super) fn try_get_all_interfaces_from_cache( interfaces_ids: HashSet<InterfaceId> ) -> (
+pub(super) fn try_get_all_interfaces_from_cache( source: &PathBuf, interfaces_ids: HashSet<InterfaceId> ) -> (
     Vec<RawInterfaceData>,
     Vec<( InterfaceId, DiscoveryError )>
 ) {
     interfaces_ids.into_iter()
-        .map(| id | RawInterfaceData::new( id ).map_err(| err | ( id, err )))
+        .map(| id | RawInterfaceData::new( source, id ).map_err(| err | ( id, err )))
         .partition_result::<Vec<_>, Vec<_>, _, _ >()
 }
 

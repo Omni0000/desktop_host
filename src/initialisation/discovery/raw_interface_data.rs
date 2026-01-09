@@ -8,7 +8,7 @@ use capnp::{ serialize, message::ReaderOptions };
 use crate::initialisation::InterfaceId ;
 use crate::capnp::common::interface_capnp ;
 use crate::capnp::manifest::interface_manifest_capnp::interface_manifest ;
-use super::{ DiscoveryError, INTERFACES_DIR };
+use super::DiscoveryError ;
 
 
 
@@ -72,6 +72,8 @@ pub enum InterfaceParseError {
     #[error( "No root interface" )] NoRootInterface,
     #[error( "No package for root interface" )] NoPackage,
     #[error( "Undeclared type: {0:?}" )] UndeclaredType( TypeId ),
+    #[cfg( feature = "test" )] #[error( "Toml Parse Error: {0}" )] TomlManifestParseError( toml::de::Error ),
+    #[cfg( feature = "test" )] #[error( "Capnp Error: {0}" )] Capnp( capnp::Error ),
 }
 
 #[derive( Error, Debug )]
@@ -81,24 +83,42 @@ pub enum InterfaceManifestReadError {
     #[error( "Invalid manifest" )] InvalidManifest,
 }
 
+
+
 impl RawInterfaceData {
 
-    pub fn new( id: InterfaceId ) -> Result<Self, DiscoveryError> {
-        let root_path = Self::root_path( id );
+    const WIT_FILE: &str = "root.wit" ;
+    const MANIFEST_FILE: &str = "manifest.bin" ;
+    /* TEST */ const MANIFEST_TOML_FILE: &str = "manifest.toml" ;
+
+    const ROOT_INTERFACE: &str = "root" ;
+
+    pub fn new( source: &PathBuf, id: InterfaceId ) -> Result<Self, DiscoveryError> {
+        let root_path = Self::root_path( source, id );
         if Self::is_complete( &root_path ) { Ok( Self {
             id,
-            manifest_data: Self::get_manifest_data( &root_path ).map_err(|err| DiscoveryError::FailedToParseInterface( id, err ))?,
+            manifest_data: Self::get_manifest_data( &root_path ).map_err(| err | DiscoveryError::FailedToParseInterface( id, err ))?,
             wit_data: Self::parse_wit( &root_path ).map_err(| err | DiscoveryError::FailedToParseInterface( id, err ))?,
         }) } else { Err( DiscoveryError::InterfaceNotInCache( id ))}
     }
 
-    #[inline] fn root_path( id: InterfaceId ) -> PathBuf { PathBuf::from( INTERFACES_DIR ).join( format!( "{}", id ) )}
+    #[inline] fn root_path( source: &PathBuf, id: InterfaceId ) -> PathBuf { source.join( id.to_string() )}
     #[inline] fn is_complete( root_path: &PathBuf ) -> bool {
-        Self::wit_path(root_path).is_file()
-        && Self::manifest_path(root_path).is_file()
+        Self::wit_path( root_path ).is_file()
+        && Self::manifest_path( root_path ).is_file()
     }
-    #[inline] fn manifest_path(root_path: &PathBuf) -> PathBuf { root_path.join( "manifest.bin" )}
-    #[inline] fn wit_path( root_path: &PathBuf ) -> PathBuf { root_path.join( "root.wit" )}
+
+    #[inline] fn wit_path( root_path: &PathBuf ) -> PathBuf { root_path.join( Self::WIT_FILE )}
+    #[inline] fn manifest_path( root_path: &PathBuf ) -> PathBuf {
+        #[cfg( not( feature = "test" ))] {
+            root_path.join( Self::MANIFEST_FILE )
+        }
+        #[cfg( feature = "test" )] {
+            let bin_path = root_path.join( Self::MANIFEST_FILE );
+            if bin_path.is_file() { bin_path }
+            else { root_path.join( Self::MANIFEST_TOML_FILE )}
+        }
+    }
 
     #[inline] pub fn id( &self ) -> &InterfaceId { &self.id }
 
@@ -107,7 +127,25 @@ impl RawInterfaceData {
     #[inline] pub fn get_resources( &self ) -> &Vec<String> { &self.wit_data.resources }
 
     #[inline] fn get_manifest_data( root_path: &PathBuf ) -> Result<Vec<u8>, InterfaceParseError> {
-        std::fs::read( Self::manifest_path( &root_path )).map_err( InterfaceParseError::Io )
+        #[cfg( not( feature = "test" ))] {
+            std::fs::read( Self::manifest_path( &root_path )).map_err( InterfaceParseError::Io )
+        }
+        #[cfg( feature = "test" )] {
+            let bin_path = root_path.join( Self::MANIFEST_FILE );
+            if bin_path.is_file() {
+                std::fs::read( Self::manifest_path( &root_path )).map_err( InterfaceParseError::Io )
+            } else {
+                let text = std::fs::read_to_string( Self::manifest_path( &root_path )).map_err( InterfaceParseError::Io )?;
+                let data: test_conversion::DeserialisableInterfaceManifest = toml::from_str( &text )
+                    .map_err( InterfaceParseError::TomlManifestParseError )?;
+                let data: test_conversion::SerialisableInterfaceManifest = data.into();
+                let mut message = capnp::message::Builder::new_default();
+                capnp_conv::Writable::write( &data, message.init_root());
+                let mut buffer = Vec::new();
+                capnp::serialize::write_message( &mut buffer, &message ).map_err( InterfaceParseError::Capnp )?;
+                Ok( buffer )
+            }
+        }
     }
 
     #[inline] fn parse_wit( root_path: &PathBuf ) -> Result<InterfaceWitData, InterfaceParseError> {
@@ -117,7 +155,7 @@ impl RawInterfaceData {
             .map_err(| err | InterfaceParseError::WitParser( err ))?;
 
         let interface = resolve.interfaces.iter().find(|( _, interface )| match &interface.name {
-            Some( name ) => name.as_str() == "root",
+            Some( name ) => name.as_str() == Self::ROOT_INTERFACE ,
             Option::None => false,
         }).ok_or( InterfaceParseError::NoRootInterface )?.1;
 
@@ -224,5 +262,58 @@ impl RawInterfaceData {
         },
         _ => false,
     })
+
+}
+
+#[cfg( feature = "test" )]
+mod test_conversion {
+
+    use capnp_conv::capnp_conv ;
+    use serde::Deserialize ;
+
+    #[derive( Deserialize )]
+    #[capnp_conv( crate::capnp::common::interface_capnp::interface_id )]
+    pub struct DeserialisableInterfaceId {
+        pub id: u64,
+    }
+
+    #[derive( Deserialize )]
+    #[capnp_conv( crate::capnp::common::version_capnp::version )]
+    pub struct DeserialisableVersion {
+        pub major: u16,
+        pub minor: u16,
+        pub patch: u16,
+    }
+
+    #[derive( Deserialize )]
+    #[capnp_conv( crate::capnp::common::interface_capnp::InterfaceCardinality )]
+    pub enum DeserialisableInterfaceCardinality {
+        One,
+        Many,
+        AtMostOne,
+        AtLeastOne,
+    }
+
+    #[derive( Deserialize )]
+    pub struct DeserialisableInterfaceManifest {
+        pub id: DeserialisableInterfaceId,
+        pub version: DeserialisableVersion,
+        pub cardinality: DeserialisableInterfaceCardinality,
+    }
+    #[capnp_conv( crate::capnp::manifest::interface_manifest_capnp::interface_manifest )]
+    pub struct SerialisableInterfaceManifest {
+        pub id: DeserialisableInterfaceId,
+        pub version: DeserialisableVersion,
+        #[capnp_conv( type = "enum" )] pub cardinality: crate::capnp::common::interface_capnp::InterfaceCardinality,
+    }
+    impl Into<SerialisableInterfaceManifest> for DeserialisableInterfaceManifest {
+        fn into( self ) -> SerialisableInterfaceManifest {
+            SerialisableInterfaceManifest {
+                id: self.id,
+                version: self.version,
+                cardinality: self.cardinality.into(),
+            }
+        }
+    }
 
 }

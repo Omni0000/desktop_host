@@ -1,5 +1,5 @@
-
 use std::collections::HashSet ;
+use std::path::PathBuf ;
 use itertools::Itertools ;
 
 use crate::utils::Merge ;
@@ -8,12 +8,12 @@ use super::{ DiscoveryError, RawPluginData };
 
 
 
-pub(super) fn try_get_all_cached_plugins( plugin_ids: Vec<PluginId> ) -> (
+pub(super) fn try_get_all_cached_plugins( source: &PathBuf, plugin_ids: Vec<PluginId> ) -> (
     Vec<RawPluginData>,
     Vec<( PluginId, DiscoveryError )>
 ) {
     plugin_ids.into_iter()
-        .map(| id | RawPluginData::new( &id ).map_err(| err | ( id, err )))
+        .map(| id | RawPluginData::new( source, &id ).map_err(| err | ( id, err )))
         .partition_result::<Vec<_>, Vec<_>, _, _ >()
 }
 

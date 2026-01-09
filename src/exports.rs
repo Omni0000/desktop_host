@@ -1,7 +1,9 @@
-use wasmtime::component::Linker;
-use wasmtime::Engine;
+use wasmtime::component::Linker ;
+use wasmtime::Engine ;
 
-use crate::initialisation::PluginContext;
+use crate::initialisation::PluginContext ;
+
+
 
 macro_rules! declare_exports {
     (
@@ -18,9 +20,11 @@ macro_rules! declare_exports {
     };
 }
 
-pub fn exports(engine: &Engine) -> (Linker<PluginContext>, Vec<wasmtime::Error>) {
-    let linker = Linker::new(&engine);
-    let linker_errors = declare_exports!(linker, []);
+pub fn exports( engine: &Engine ) -> ( Linker<PluginContext>, Vec<wasmtime::Error> ) {
 
-    (linker, linker_errors)
+    let mut linker = Linker::new( &engine );
+    let linker_errors = declare_exports!( linker, []);
+
+    ( linker, linker_errors )
+
 }

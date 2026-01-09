@@ -1,6 +1,6 @@
 
-const PLUGINS_DIR: &str = "./appdata/plugins";
-const INTERFACES_DIR: &str = "./appdata/interfaces";
+const PLUGINS_DIR: &str = "plugins";
+const INTERFACES_DIR: &str = "interfaces";
 
 mod get_plugins ;
 mod discover_all ;
