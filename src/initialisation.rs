@@ -7,10 +7,10 @@ mod loading ;
 mod types ;
 
 pub use types::{ PluginId, InterfaceId };
-pub use discovery::{ RawPluginData as PluginData };
-pub use loading::{ PluginTree, PluginContext };
-use discovery::{ RawPluginData, RawInterfaceData, InterfaceCardinality,
-    FunctionData, FunctionReturnType, InterfaceManifestReadError, PluginManifestReadError, InterfaceParseError };
+pub use discovery::{ RawPluginData as PluginData, InterfaceCardinality };
+pub use loading::{ PluginTree, PluginContext, Socket, PreloadError };
+use discovery::{ RawPluginData, RawInterfaceData, FunctionData, FunctionReturnType,
+    InterfaceManifestReadError, PluginManifestReadError, InterfaceParseError, discover_all };
 
 
 
@@ -22,7 +22,7 @@ pub enum UnrecoverableStartupError {
 
 pub fn initialise_plugin_tree( source: &PathBuf, root_interface_id: &InterfaceId ) -> Result<PluginTree, UnrecoverableStartupError> {
 
-    let ( socket_map, plugin_discovery_errors ) = discovery::discover_all( source )?;
+    let ( socket_map, plugin_discovery_errors ) = discover_all( source, root_interface_id )?;
     plugin_discovery_errors.iter().for_each(| err | crate::utils::produce_warning( err ));
 
     let engine = Engine::default();

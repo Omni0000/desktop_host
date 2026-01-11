@@ -34,3 +34,17 @@ Running this project will require installing the following:
 ### Plugin System
 
 Plugins connect via abstract interfaces defined in the [WIT](https://github.com/WebAssembly/component-model/blob/main/design/mvp/WIT.md) format. These are not tied to any specific plugin, instead, each plugin defines a 'plug' pointing to an interface it implements, and optionally, a list of 'sockets', pointing to interfaces it expects to call into.
+
+## Running Tests
+
+For maintainability purposes, tests use TOML files for manifest declarations and WAT files for the plugin code where viable. These are not supported by default but are instead locked behind the `test` feature. To run tests, use the command bellow:
+
+```bash
+cargo test --features test
+```
+
+or when running specific suites use:
+
+```bash
+cargo test --features test --test <suite>
+```

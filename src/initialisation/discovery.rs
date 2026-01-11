@@ -1,6 +1,6 @@
 
-const PLUGINS_DIR: &str = "plugins";
-const INTERFACES_DIR: &str = "interfaces";
+pub(crate) const INTERFACES_DIR: &str = "interfaces" ;
+const PLUGINS_DIR: &str = "plugins" ;
 
 mod get_plugins ;
 mod discover_all ;

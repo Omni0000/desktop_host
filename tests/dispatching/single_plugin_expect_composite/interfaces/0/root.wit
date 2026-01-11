@@ -1,0 +1,5 @@
+package test:composite ;
+
+interface root {
+  get-data: func() -> tuple<u32, u32>;
+}

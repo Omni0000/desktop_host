@@ -1,0 +1,5 @@
+package test:dependant-composite ;
+
+interface root {
+  get-composite: func() -> tuple<u32, u32>;
+}

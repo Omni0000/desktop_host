@@ -193,10 +193,10 @@ impl RawInterfaceData {
             .map_err(|_| InterfaceManifestReadError::InvalidManifest )?;
 
         Ok( match cardinality {
-            interface_capnp::InterfaceCardinality::One => InterfaceCardinality::ExactlyOne,
-            interface_capnp::InterfaceCardinality::Many => InterfaceCardinality::Any,
             interface_capnp::InterfaceCardinality::AtMostOne => InterfaceCardinality::AtMostOne,
+            interface_capnp::InterfaceCardinality::ExactlyOne => InterfaceCardinality::ExactlyOne,
             interface_capnp::InterfaceCardinality::AtLeastOne => InterfaceCardinality::AtLeastOne,
+            interface_capnp::InterfaceCardinality::Any => InterfaceCardinality::Any,
         })
 
     }
@@ -288,10 +288,10 @@ mod test_conversion {
     #[derive( Deserialize )]
     #[capnp_conv( crate::capnp::common::interface_capnp::InterfaceCardinality )]
     pub enum DeserialisableInterfaceCardinality {
-        One,
-        Many,
         AtMostOne,
+        ExactlyOne,
         AtLeastOne,
+        Any,
     }
 
     #[derive( Deserialize )]

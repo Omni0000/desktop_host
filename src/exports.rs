@@ -22,7 +22,7 @@ macro_rules! declare_exports {
 
 pub fn exports( engine: &Engine ) -> ( Linker<PluginContext>, Vec<wasmtime::Error> ) {
 
-    let mut linker = Linker::new( &engine );
+    let linker = Linker::new( &engine );
     let linker_errors = declare_exports!( linker, []);
 
     ( linker, linker_errors )

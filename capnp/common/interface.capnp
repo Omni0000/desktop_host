@@ -5,8 +5,8 @@ struct InterfaceId {
 }
 
 enum InterfaceCardinality {
-  one @0 ;
-  many @1 ;
-  atMostOne @2 ;
-  atLeastOne @3 ;
+  atMostOne @0 ;
+  exactlyOne @1 ;
+  atLeastOne @2 ;
+  any @3 ;
 }

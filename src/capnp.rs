@@ -1,5 +1,5 @@
 macro_rules! include_capnp {
-    
+
     ($parent_name:ident { $($child_items:tt)* } $(,)*) => {
         pub mod $parent_name {
             include_capnp! { @inner_path_builder [$parent_name] $($child_items)* }

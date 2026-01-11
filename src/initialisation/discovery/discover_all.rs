@@ -19,10 +19,10 @@ pub enum DiscoveryError {
     #[error( "Plugin not in cache: {0}" )]
     PluginNotInCache( PluginId ),
 
-    #[error( "Download failed: {0}" )]
-    DownloadFailed( PluginId ),
+    #[error( "Plugin download failed: {0}" )]
+    PluginDownloadFailed( PluginId ),
 
-    #[error( "Download failed: {0}" )]
+    #[error( "Interface download failed: {0}" )]
     DownloadFailedInterface( InterfaceId ),
     
     #[error( "Interface not in cache: {0}" )]
@@ -47,7 +47,7 @@ pub enum DiscoveryFailure {
     #[error( "Io Error: {0}" )] Io( std::io::Error ),
 }
 
-pub fn discover_all( source: &PathBuf ) -> Result<(
+pub fn discover_all( source: &PathBuf, root_interface_id: &InterfaceId ) -> Result<(
     HashMap<InterfaceId, ( RawInterfaceData, Vec<RawPluginData> )>,
     Vec<DiscoveryError>,
 ), DiscoveryFailure> {
@@ -60,7 +60,8 @@ pub fn discover_all( source: &PathBuf ) -> Result<(
     let ( downloaded_plugins, plugin_download_errors ) = try_download_plugins( missing_plugin_ids );
     let errors = errors.merge_all( plugin_download_errors );
 
-    let ( plugins, used_interface_ids, manifest_errors ) = try_get_used_interfaces( cached_plugins.into_iter().chain( downloaded_plugins.into_iter() ));
+    let ( plugins, mut used_interface_ids, manifest_errors ) = try_get_used_interfaces( cached_plugins.into_iter().chain( downloaded_plugins.into_iter() ));
+    used_interface_ids.insert( *root_interface_id );
     let errors = errors.merge_all( manifest_errors );
 
     let ( plugins, manifest_errors ) = try_into_socket_map( plugins );
@@ -94,7 +95,6 @@ fn read_cache_header( source: &PathBuf ) -> Result<Vec<PluginId>, DiscoveryFailu
         )
     }
 }
-
 
 fn build_socket_map(
     interfaces: impl Iterator<Item = RawInterfaceData>,

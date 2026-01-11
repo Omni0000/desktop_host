@@ -1,0 +1,5 @@
+package test:primitive ;
+
+interface root {
+  get-primitive: func() -> u32;
+}

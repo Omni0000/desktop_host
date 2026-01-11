@@ -9,6 +9,7 @@ use super::{ preload_plugin_tree, Socket, PluginInstance, PluginContext, Preload
 
 
 
+#[derive( Debug )]
 pub struct PluginTree {
     pub(super) root_socket: Arc<Socket<RwLock<PluginInstance>>>,
     pub(super) _root_interface: Arc<RawInterfaceData>,

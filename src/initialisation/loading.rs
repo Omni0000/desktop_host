@@ -15,7 +15,7 @@ pub use plugin_tree::{ PluginTree };
 pub use plugin_instance::PluginInstance ;
 pub use preload_plugin_tree::PreloadError ;
 pub use plugin_context::PluginContext ;
-use socket::Socket ;
+pub use socket::Socket ;
 use preload_plugin_tree::{ PreloadResult, preload_plugin_tree };
 use preload_socket::{ SocketState, preload_socket };
 use preload_plugin::preload_plugin ;
