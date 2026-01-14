@@ -6,6 +6,13 @@ Omni is a platform for building fully modular applications based around [WebAsse
 
 **Note:** This project is in early alpha. Expect breaking changes, incomplete features, and potential instability.
 
+## Project Philosophy
+
+- **Single tool, single task:** Apps should be broken up into small chunks that are meant to be composed together to create a whole.
+- **Build around your workflow, not services:** Everything **You** use for a single task should be working together instead of you trying to duct-tape it together yourself.
+- **The client belongs to the user:** Any part should be able to be easily added, removed or switched out for something else.
+- **Zero-trust by default:** Don't just use something and expect it behaves, assume malice and constraint it to the minimum capabilities required.
+
 ## Quick Start
 
 ### Using Nix (Recommended)
