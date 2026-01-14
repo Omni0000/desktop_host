@@ -1,0 +1,24 @@
+package omni:common ;
+
+/// Types related to reexport type transformations
+/// Dependant on interface cardinality:
+/// at-least-one: T -> option< result<T, dispatch-error> >
+/// exactly-one:  T ->         result<T, dispatch-error>
+/// at-most-one:  T ->   list< result<T, dispatch-error> >
+/// any:          T ->   list< result<T, dispatch-error> >
+interface dispatch {
+
+    /// The possible error variants returned by a call into a plugin
+    variant dispatch-error {
+        deadlock,
+        wit-parser-error( string ),
+        invalid-interface( string ),
+        invalid-function( string ),
+        missing-response,
+        runtime-exception( string ),
+        invalid-argument-list,
+        resource-creation-error( string ),
+        resource-receive-error( string ),
+    }
+
+}

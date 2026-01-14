@@ -1,0 +1,15 @@
+/// Package for connecting onto the startup socket (0x00000000u64 - root app socket)
+package omni:startup ;
+
+/// API-defining interface
+/// Used by the app at runtime
+interface root {
+    startup: func();
+}
+
+/// Post-reexport transormation of root
+/// cardinality: 'Any'
+interface root-reexport {
+    use omni:common/dispatch.{ dispatch-error };
+    startup: func() -> list<result<_, dispatch-error>> ;
+}
