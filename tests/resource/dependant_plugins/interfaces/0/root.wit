@@ -1,0 +1,5 @@
+package test:consumer;
+
+interface root {
+  get-value: func() -> u32;
+}
