@@ -5,7 +5,7 @@
     )
   )
   (core instance $i (instantiate $m))
-  (func $f (export "get-value") (canon lift (core func $i "get-value")))
+  (func $f (export "get-value") (result u32) (canon lift (core func $i "get-value")))
   (instance $inst
     (export "get-value" (func $f))
   )

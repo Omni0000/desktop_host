@@ -1,5 +1,0 @@
-package test:child ;
-
-interface root {
-  get-value: func() -> u32;
-}

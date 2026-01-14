@@ -1,6 +1,0 @@
-package test:startup ;
-
-interface root {
-  enum bar { bar }
-  startup: func();
-}

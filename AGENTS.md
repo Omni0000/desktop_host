@@ -32,7 +32,7 @@ Note: Tests are feature-gated behind the `test` flag and use TOML/WAT fixtures.
 ```bash
 cargo test --features test --test <suite_name> -- --nocapture
 ```
-Available test suites: `loading_tests`, `dispatching_tests`, `resource_tests`, `error_handling_tests`, `cardinality_tests`
+Available test suites: `dispatching_tests`, `resource_tests`, `error_handling_tests`, `cardinality_tests`
 
 ## Project Structure
 - **src/**: Main source code.

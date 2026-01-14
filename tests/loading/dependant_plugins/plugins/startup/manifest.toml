@@ -1,5 +1,0 @@
-id = { id = "startup" }
-version = { major = 1, minor = 0, patch = 0 }
-plug = { id = 0 }
-sockets = [{ id = 1 }]
-permissions = []
