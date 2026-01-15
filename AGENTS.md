@@ -73,6 +73,7 @@ Available test suites: `dispatching_tests`, `resource_tests`, `error_handling_te
 - Group imports by external crates, then internal modules ordered by source crate, then super then submodules
 - Avoid wildcard imports even when importing many related items except for preludes 
 - Keep module declarations at the top of files
+- Do not use mod.rs files; put module files one directory higher with the same name as the module
 
 ### Naming Conventions
 - do not ever use single letter names
