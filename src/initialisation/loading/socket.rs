@@ -47,14 +47,14 @@ impl Socket<RwLock<PluginInstance>> {
     }
 }
 
-impl Into<Val> for Socket<Val> {
-    fn into( self ) -> Val {
-        match self {
-            Self::AtMostOne( Option::None ) => Val::Option( Option::None ),
-            Self::AtMostOne( Some( val )) => Val::Option( Some( Box::new( val ))),
-            Self::ExactlyOne( val ) => val,
-            Self::AtLeastOne( items )
-            | Self::Any( items ) => Val::List( items.into_iter().map(|( _, item )| item ).collect() ),
+impl From<Socket<Val>> for Val {
+    fn from( socket: Socket<Val> ) -> Self {
+        match socket {
+            Socket::AtMostOne( Option::None ) => Val::Option( Option::None ),
+            Socket::AtMostOne( Some( val )) => Val::Option( Some( Box::new( val ))),
+            Socket::ExactlyOne( val ) => val,
+            Socket::AtLeastOne( items )
+            | Socket::Any( items ) => Val::List( items.into_values().collect() ),
         }
     }
 }

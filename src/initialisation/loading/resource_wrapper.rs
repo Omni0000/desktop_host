@@ -22,10 +22,10 @@ pub enum ResourceCreationError {
     #[error( "Lock Rejected" )] LockRejected,
     #[error( "Resource Table Full" )] ResourceTableFull,
 }
-impl Into<Val> for ResourceCreationError {
-    fn into( self ) -> Val { match self {
-        Self::LockRejected => Val::Variant( "resource-table-lock-rejected".to_string(), None ),
-        Self::ResourceTableFull => Val::Variant( "resource-table-full".to_string(), None ),
+impl From<ResourceCreationError> for Val {
+    fn from( error: ResourceCreationError ) -> Self { match error {
+        ResourceCreationError::LockRejected => Val::Variant( "resource-table-lock-rejected".to_string(), None ),
+        ResourceCreationError::ResourceTableFull => Val::Variant( "resource-table-full".to_string(), None ),
     }}
 }
 
@@ -34,10 +34,10 @@ pub enum ResourceReceiveError {
     #[error( "Lock Rejected" )] LockRejected,
     #[error( "Invalid Handle" )] InvalidHandle,
 }
-impl Into<Val> for ResourceReceiveError {
-    fn into( self ) -> Val { match self {
-        Self::LockRejected => Val::Variant( "resource-table-lock-rejected".to_string(), None ),
-        Self::InvalidHandle => Val::Variant( "invalid-resource-handle".to_string(), None ),
+impl From<ResourceReceiveError> for Val {
+    fn from( error: ResourceReceiveError ) -> Self { match error {
+        ResourceReceiveError::LockRejected => Val::Variant( "resource-table-lock-rejected".to_string(), None ),
+        ResourceReceiveError::InvalidHandle => Val::Variant( "invalid-resource-handle".to_string(), None ),
     }}
 }
 
@@ -55,9 +55,9 @@ impl ResourceWrapper {
     }
     pub fn from_handle(
         handle: ResourceAny,
-        mut store: &mut impl AsContextMut,
+        store: &mut impl AsContextMut,
     ) -> Result<Arc<Self>, ResourceReceiveError> {
-        let resource = Resource::try_from_resource_any( handle, &mut store ).map_err(|_| ResourceReceiveError::InvalidHandle )?;
+        let resource = Resource::try_from_resource_any( handle, store ).map_err(|_| ResourceReceiveError::InvalidHandle )?;
         let lock = RESOURCE_TABLE.lock().map_err(|_| ResourceReceiveError::LockRejected )?;
         let wrapped = lock.get( &resource ).map_err(|_| ResourceReceiveError::InvalidHandle )?;
         // let resource = ResourceAny::try_from_resource( resource, &mut store ).map_err(|_| unreachable!( "Resource already taken" ))?;

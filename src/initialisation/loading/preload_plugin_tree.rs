@@ -1,12 +1,13 @@
-use std::sync::{ Arc, RwLock };
+use std::sync::Arc ;
 use std::collections::HashMap ;
 use thiserror::Error ;
 use wasmtime::Engine;
 use wasmtime::component::Linker ;
 
-use crate::InterfaceId ; 
-use super::{ RawInterfaceData, RawPluginData, InterfaceCardinality, InterfaceManifestReadError, PluginManifestReadError };
-use super::{ Socket, PluginInstance, PluginContext, preload_socket, SocketState };
+use crate::InterfaceId ;
+use crate::utils::PartialResult ;
+use super::{ RawInterfaceData, RawPluginData, InterfaceCardinality, InterfaceManifestReadError, PluginManifestReadError, RawSocketMap };
+use super::{ PluginContext, preload_socket, SocketState, LoadedSocket };
 
 
 
@@ -42,6 +43,10 @@ pub enum PreloadError {
 
 }
 
+/// Result of a preload operation that may have partial failures.
+/// The `errors` field contains handled preload failures
+/// Convinience abstraction semantically equivalent to:
+/// `( SocketMap, PreloadResult<T, PreloadError, PreloadError> )`
 #[derive(Debug)]
 pub(super) struct PreloadResult<T> {
     pub socket_map: HashMap<InterfaceId, SocketState>,
@@ -50,26 +55,18 @@ pub(super) struct PreloadResult<T> {
 }
 
 #[inline] pub(super) fn preload_plugin_tree(
-    socket_map: HashMap<InterfaceId, ( RawInterfaceData, Vec<RawPluginData> )>,
+    socket_map: RawSocketMap,
     engine: &Engine,
     default_linker: &Linker<PluginContext>,
     root: InterfaceId,
-) -> Result<(
-    Arc<RawInterfaceData>,
-    Arc<Socket<RwLock<PluginInstance>>>,
-    Vec<PreloadError>,
-), (
-    PreloadError,
-    Vec<PreloadError>,
-)> {
-
+) -> PartialResult<( Arc<RawInterfaceData>, Arc<LoadedSocket> ), PreloadError, PreloadError> {
     match preload_socket(
         wrap_unprocessed( socket_map ),
         engine,
         default_linker,
         root,
     ) {
-        PreloadResult { socket_map: _, result: Ok(( interface, socket )), errors } => Ok(( interface, socket, errors )),
+        PreloadResult { socket_map: _, result: Ok(( interface, socket )), errors } => Ok((( interface, socket ), errors )),
         PreloadResult { socket_map: _, result: Err( err ), errors } => Err(( err, errors ))
     }
 

@@ -11,14 +11,15 @@ use super::{ Socket, PluginInstance, PluginContext, PreloadResult, preload_plugi
 
 
 
-#[derive( Debug )]
+pub type LoadedSocket = Socket<RwLock<PluginInstance>> ;
+
+#[derive( Debug, Default )]
 pub(super) enum SocketState {
     Unprocessed( RawInterfaceData, Vec<RawPluginData> ),
-    Preloaded( Arc<RawInterfaceData>, Arc<Socket<RwLock<PluginInstance>>> ),
+    Preloaded( Arc<RawInterfaceData>, Arc<LoadedSocket> ),
     Failed,
-    Borrowed,
+    #[default] Borrowed,
 }
-impl Default for SocketState { fn default() -> Self { Self::Borrowed }}
 impl From<( RawInterfaceData, Vec<RawPluginData> )> for SocketState {
     fn from(( interface, plugins ): ( RawInterfaceData, Vec<RawPluginData> ) ) -> Self { Self::Unprocessed( interface, plugins )}
 }
@@ -28,16 +29,13 @@ pub(super) fn preload_socket(
     engine: &Engine,
     default_linker: &Linker<PluginContext>,
     socket_id: InterfaceId
-) -> PreloadResult<(
-    Arc<RawInterfaceData>,
-    Arc<Socket<RwLock<PluginInstance>>>,
-)> {
+) -> PreloadResult<( Arc<RawInterfaceData>, Arc<LoadedSocket> )> {
 
     // NOTE: do not forget to add the entry back if it's already preloaded
     let socket_plugins = match socket_map.insert( socket_id, SocketState::Borrowed ) {
         Some( plugins ) => plugins,
         // REDUNDANT: all requested sockets should have been handled in discovery
-        Option::None => return PreloadResult { socket_map, result: Err( PreloadError::InvalidSocket( socket_id.clone() )), errors: Vec::with_capacity( 0 )},
+        Option::None => return PreloadResult { socket_map, result: Err( PreloadError::InvalidSocket( socket_id )), errors: Vec::with_capacity( 0 )},
     };
 
     match socket_plugins {
@@ -166,7 +164,7 @@ pub(super) fn preload_socket(
     plugins: Vec<RawPluginData>,
 ) -> PreloadResult<Vec<PluginInstance>> {
 
-    if plugins.len() < 1 { return PreloadResult {
+    if plugins.is_empty() { return PreloadResult {
         socket_map,
         result: Err( PreloadError::FailedCardinalityRequirements( InterfaceCardinality::AtLeastOne, 0 )),
         errors: Vec::with_capacity( 0 ),
@@ -174,7 +172,7 @@ pub(super) fn preload_socket(
 
     let ( socket_map, plugins, errors ) = preload_any( socket_map, engine, default_linker, plugins );
 
-    if plugins.len() < 1 { return PreloadResult {
+    if plugins.is_empty() { return PreloadResult {
         socket_map,
         result: Err( PreloadError::FailedCardinalityRequirements( InterfaceCardinality::AtLeastOne, 0 )),
         errors,

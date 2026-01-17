@@ -21,17 +21,17 @@ pub enum DispatchError {
     #[error( "Resource Create Error: {0}" )] ResourceCreationError( #[from] ResourceCreationError ),
     #[error( "Resource Receive Error: {0}" )] ResourceReceiveError( #[from] ResourceReceiveError ),
 }
-impl Into<Val> for DispatchError {
-    fn into(self) -> Val { match self {
-        Self::Deadlock => Val::Variant( "deadlock".to_string(), None ),
-        Self::WitParserError( err ) => Val::Variant( "wit-parser-error".to_string(), Some( Box::new( Val::String( err.to_string() )))),
-        Self::InvalidInterface( package ) => Val::Variant( "invalid-interface".to_string(), Some( Box::new( Val::String( package )))),
-        Self::InvalidFunction( function ) => Val::Variant( "invalid-function".to_string(), Some( Box::new( Val::String( function )))),
-        Self::MissingResponse => Val::Variant( "missing-response".to_string(), None ),
-        Self::RuntimeException( exception ) => Val::Variant( "runtime-exception".to_string(), Some( Box::new( Val::String( exception.to_string() )))),
-        Self::InvalidArgumentList => Val::Variant( "invalid-argument-list".to_string(), None ),
-        Self::ResourceCreationError( err ) => err.into(),
-        Self::ResourceReceiveError( err ) => err.into(),
+impl From<DispatchError> for Val {
+    fn from( error: DispatchError ) -> Val { match error {
+        DispatchError::Deadlock => Val::Variant( "deadlock".to_string(), None ),
+        DispatchError::WitParserError( err ) => Val::Variant( "wit-parser-error".to_string(), Some( Box::new( Val::String( err.to_string() )))),
+        DispatchError::InvalidInterface( package ) => Val::Variant( "invalid-interface".to_string(), Some( Box::new( Val::String( package )))),
+        DispatchError::InvalidFunction( function ) => Val::Variant( "invalid-function".to_string(), Some( Box::new( Val::String( function )))),
+        DispatchError::MissingResponse => Val::Variant( "missing-response".to_string(), None ),
+        DispatchError::RuntimeException( exception ) => Val::Variant( "runtime-exception".to_string(), Some( Box::new( Val::String( exception.to_string() )))),
+        DispatchError::InvalidArgumentList => Val::Variant( "invalid-argument-list".to_string(), None ),
+        DispatchError::ResourceCreationError( err ) => err.into(),
+        DispatchError::ResourceReceiveError( err ) => err.into(),
     }}
 }
 
@@ -71,7 +71,7 @@ impl Socket<RwLock<PluginInstance>> {
         function: &FunctionData,
         data: &[Val],
     ) -> Val {
-        debug_assert!( function.is_method() == false );
+        debug_assert!( !function.is_method() );
         self.map(| plugin | Val::Result( match Self::dispatch_function_of( &mut ctx, plugin, interface_path, function, data ) {
             Ok( val ) => Ok( Some( Box::new( val ))),
             Err( err ) => Err( Some( Box::new( err.into() ))),
@@ -85,7 +85,7 @@ impl Socket<RwLock<PluginInstance>> {
         function: &FunctionData,
         data: &[Val],
     ) -> Val {
-        debug_assert!( function.is_method() == true );
+        debug_assert!( function.is_method() );
         Val::Result( match Self::route_method( self, ctx, interface_path, function, data ) {
             Ok( val ) => Ok( Some( Box::new( val ))),
             Err( err ) => Err( Some( Box::new( err.into() ))),
@@ -144,7 +144,7 @@ impl Socket<RwLock<PluginInstance>> {
         data: &[Val],
     ) -> Result<Val, DispatchError> {
 
-        let handle = match data.get(0) {
+        let handle = match data.first() {
             Some( Val::Resource( handle )) => Ok( handle ),
             _ => Err( DispatchError::InvalidArgumentList ),
         }?;
@@ -187,11 +187,11 @@ impl PluginInstance {
             .get_export_index( &mut self.store, Some( &interface_index ), function )
             .ok_or( DispatchError::InvalidFunction( format!( "{}:{}", interface_path, function )))?;
         let func = self.instance
-            .get_func( &mut self.store, &func_index )
+            .get_func( &mut self.store, func_index )
             .ok_or( DispatchError::InvalidFunction( format!( "{}:{}", interface_path, function )))?;
         func
             .call( &mut self.store, data, &mut buffer )
-            .map_err(| err | DispatchError::RuntimeException( err ))?;
+            .map_err( DispatchError::RuntimeException )?;
         let _ = func.post_return( &mut self.store );
 
         Ok( match returns {

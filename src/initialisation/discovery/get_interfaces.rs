@@ -1,5 +1,5 @@
 use std::collections::{ HashSet, HashMap };
-use std::path::PathBuf ;
+use std::path::Path ;
 use itertools::Itertools ;
 
 use crate::initialisation::InterfaceId ;
@@ -23,7 +23,7 @@ pub(super) fn try_into_socket_map( plugins: Vec<RawPluginData> ) -> ( HashMap<In
     ( plugins, errors )
 }
 
-pub(super) fn try_get_all_interfaces_from_cache( source: &PathBuf, interfaces_ids: HashSet<InterfaceId> ) -> (
+pub(super) fn try_get_all_interfaces_from_cache( source: &Path, interfaces_ids: HashSet<InterfaceId> ) -> (
     Vec<RawInterfaceData>,
     Vec<( InterfaceId, DiscoveryError )>
 ) {

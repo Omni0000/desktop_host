@@ -1,5 +1,5 @@
 use std::collections::HashSet ;
-use std::path::PathBuf ;
+use std::path::Path ;
 use itertools::Itertools ;
 
 use crate::utils::Merge ;
@@ -8,7 +8,7 @@ use super::{ DiscoveryError, RawPluginData };
 
 
 
-pub(super) fn try_get_all_cached_plugins( source: &PathBuf, plugin_ids: Vec<PluginId> ) -> (
+pub(super) fn try_get_all_cached_plugins( source: &Path, plugin_ids: Vec<PluginId> ) -> (
     Vec<RawPluginData>,
     Vec<( PluginId, DiscoveryError )>
 ) {
@@ -26,7 +26,7 @@ pub(super) fn try_download_plugins( plugin_ids: Vec<PluginId> ) -> (
         .partition_result()
 }
 
-pub(super) fn try_get_used_interfaces<'a>( plugins: impl Iterator<Item = RawPluginData> ) -> (
+pub(super) fn try_get_used_interfaces( plugins: impl Iterator<Item = RawPluginData> ) -> (
     Vec<RawPluginData>,
     HashSet<InterfaceId>,
     Vec<DiscoveryError>

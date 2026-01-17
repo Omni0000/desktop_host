@@ -60,7 +60,7 @@ where
         let mapped = unsafe {
             // UNSAFE: takes self.state, maps it and replaces it with the new value
             // NOTE: UB on self.f panic but who cares about the panic path anyways
-            let old_state = std::ptr::read( &mut self.state );
+            let old_state = std::ptr::read( &self.state );
             let ( mapped, new_state ) = ( self.f )( item, old_state );
             std::ptr::write( &mut self.state, new_state );
             mapped

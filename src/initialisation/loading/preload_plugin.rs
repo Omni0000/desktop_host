@@ -6,7 +6,7 @@ use wasmtime::component::{ Component, Linker, ResourceType };
 use crate::utils::Merge ;
 use crate::InterfaceId ;
 use super::{ RawPluginData, RawInterfaceData, FunctionData };
-use super::{ Socket, PluginInstance, PluginContext, preload_socket, SocketState, PreloadResult, ResourceWrapper, PreloadError };
+use super::{ Socket, PluginInstance, PluginContext, preload_socket, SocketState, PreloadResult, ResourceWrapper, PreloadError, LoadedSocket };
 
 
 
@@ -15,7 +15,7 @@ use super::{ Socket, PluginInstance, PluginContext, preload_socket, SocketState,
     engine: &Engine,
     default_linker: &Linker<PluginContext>,
     mut plugin: RawPluginData,
-) -> PreloadResult< PluginInstance > {
+) -> PreloadResult<PluginInstance> {
     
     let socket_ids = match plugin.get_sockets() {
         Ok( ids ) => ids,
@@ -60,14 +60,11 @@ use super::{ Socket, PluginInstance, PluginContext, preload_socket, SocketState,
 }
 
 #[inline] fn preload_child_sockets(
-    socket_ids: &Vec<InterfaceId>,
+    socket_ids: &[InterfaceId],
     socket_map: HashMap<InterfaceId, SocketState>,
     engine: &Engine,
     default_linker: &Linker<PluginContext>,
-) -> PreloadResult< Vec<(
-    Arc<RawInterfaceData>,
-    Arc<Socket<RwLock<PluginInstance>>>,
-)> > {
+) -> PreloadResult<Vec<( Arc<RawInterfaceData>, Arc<LoadedSocket> )>> {
 
     match socket_ids.iter().try_fold(
         ( socket_map, Vec::<( _, _)>::new(), Vec::<PreloadError>::new() ),
@@ -94,8 +91,7 @@ use super::{ Socket, PluginInstance, PluginContext, preload_socket, SocketState,
     let interface_ident = format!( "{}/root", package );
 
     let mut root = linker.root();
-    let mut linker_instance = root.instance( &interface_ident )
-        .map_err(| err | PreloadError::FailedToLinkRootInterface( err ))?;
+    let mut linker_instance = root.instance( &interface_ident ).map_err( PreloadError::FailedToLinkRootInterface )?;
 
     interface.get_functions().into_iter().try_for_each(| function: &FunctionData | -> Result<(), PreloadError> {
             

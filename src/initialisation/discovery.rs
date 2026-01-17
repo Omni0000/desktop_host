@@ -8,7 +8,7 @@ mod get_interfaces ;
 mod raw_plugin_data ;
 mod raw_interface_data ;
 
-pub use discover_all::{ discover_all, DiscoveryError, DiscoveryFailure };
+pub use discover_all::{ RawSocketMap, discover_all, DiscoveryError, DiscoveryFailure };
 pub use raw_plugin_data::{ RawPluginData, PluginManifestReadError };
 pub use raw_interface_data::{ RawInterfaceData, InterfaceCardinality, InterfaceParseError, FunctionData, FunctionReturnType, InterfaceManifestReadError };
 use get_plugins::{ try_get_all_cached_plugins, try_download_plugins, try_get_used_interfaces };

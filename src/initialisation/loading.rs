@@ -1,4 +1,4 @@
-use super::{ RawInterfaceData, RawPluginData, PluginManifestReadError };
+use super::{ RawInterfaceData, RawPluginData, PluginManifestReadError, RawSocketMap };
 use super::{ InterfaceCardinality, FunctionData, FunctionReturnType, InterfaceParseError, InterfaceManifestReadError };
 
 mod plugin_tree ;
@@ -17,6 +17,6 @@ pub use preload_plugin_tree::PreloadError ;
 pub use plugin_context::PluginContext ;
 pub use socket::Socket ;
 use preload_plugin_tree::{ PreloadResult, preload_plugin_tree };
-use preload_socket::{ SocketState, preload_socket };
+use preload_socket::{ SocketState, LoadedSocket, preload_socket };
 use preload_plugin::preload_plugin ;
 use resource_wrapper::{ ResourceWrapper, ResourceCreationError, ResourceReceiveError };

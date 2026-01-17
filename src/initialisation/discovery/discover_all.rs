@@ -1,8 +1,9 @@
-use std::path::PathBuf ;
+use std::path::Path;
 use std::collections::HashMap ;
 use thiserror::Error ;
 
 use crate::utils::Merge ;
+use crate::utils::PartialSuccess ;
 use crate::initialisation::{ PluginId, InterfaceId };
 use super::{
     RawPluginData, RawInterfaceData, PluginManifestReadError, InterfaceParseError,
@@ -47,10 +48,9 @@ pub enum DiscoveryFailure {
     #[error( "Io Error: {0}" )] Io( std::io::Error ),
 }
 
-pub fn discover_all( source: &PathBuf, root_interface_id: &InterfaceId ) -> Result<(
-    HashMap<InterfaceId, ( RawInterfaceData, Vec<RawPluginData> )>,
-    Vec<DiscoveryError>,
-), DiscoveryFailure> {
+pub type RawSocketMap = HashMap<InterfaceId, ( RawInterfaceData, Vec<RawPluginData> )> ;
+
+pub fn discover_all( source: &Path, root_interface_id: &InterfaceId ) -> Result<PartialSuccess<RawSocketMap, DiscoveryError>, DiscoveryFailure> {
 
     let cached_plugin_ids = read_cache_header( source )?;
 
@@ -60,7 +60,7 @@ pub fn discover_all( source: &PathBuf, root_interface_id: &InterfaceId ) -> Resu
     let ( downloaded_plugins, plugin_download_errors ) = try_download_plugins( missing_plugin_ids );
     let errors = errors.merge_all( plugin_download_errors );
 
-    let ( plugins, mut used_interface_ids, manifest_errors ) = try_get_used_interfaces( cached_plugins.into_iter().chain( downloaded_plugins.into_iter() ));
+    let ( plugins, mut used_interface_ids, manifest_errors ) = try_get_used_interfaces( cached_plugins.into_iter().chain( downloaded_plugins ));
     used_interface_ids.insert( *root_interface_id );
     let errors = errors.merge_all( manifest_errors );
 
@@ -74,13 +74,13 @@ pub fn discover_all( source: &PathBuf, root_interface_id: &InterfaceId ) -> Resu
     let ( downloaded_interfaces, interface_download_errors ) = try_download_all_interfaces( missing_interface_ids );
     let errors = errors.merge_all( interface_download_errors );
 
-    let socket_map = build_socket_map( cached_interfaces.into_iter().chain( downloaded_interfaces.into_iter() ), plugins );
+    let socket_map = build_socket_map( cached_interfaces.into_iter().chain( downloaded_interfaces ), plugins );
 
     Ok(( socket_map, errors ))
 
 }
 
-fn read_cache_header( source: &PathBuf ) -> Result<Vec<PluginId>, DiscoveryFailure> {
+fn read_cache_header( source: &Path ) -> Result<Vec<PluginId>, DiscoveryFailure> {
     if !cfg!( feature = "test" ) {
         Ok( vec![
             String::from( "foo" ),
@@ -102,8 +102,8 @@ fn build_socket_map(
 ) -> HashMap<InterfaceId, ( RawInterfaceData, Vec<RawPluginData> )> {
     interfaces
         .map(| interface | {
-            let plugins_list = plugins.remove( interface.id() ).unwrap_or( Vec::new() );
-            ( interface.id().clone(), ( interface, plugins_list ))
+            let plugins_list = plugins.remove( interface.id() ).unwrap_or_default();
+            ( *interface.id(), ( interface, plugins_list ))
         })
         .collect()
 }

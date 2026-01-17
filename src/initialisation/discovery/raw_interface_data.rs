@@ -89,11 +89,11 @@ impl RawInterfaceData {
 
     const WIT_FILE: &str = "root.wit" ;
     const MANIFEST_FILE: &str = "manifest.bin" ;
-    /* TEST */ const MANIFEST_TOML_FILE: &str = "manifest.toml" ;
+    #[cfg( feature = "test" )] const MANIFEST_TOML_FILE: &str = "manifest.toml" ;
 
     const ROOT_INTERFACE: &str = "root" ;
 
-    pub fn new( source: &PathBuf, id: InterfaceId ) -> Result<Self, DiscoveryError> {
+    pub fn new( source: &Path, id: InterfaceId ) -> Result<Self, DiscoveryError> {
         let root_path = Self::root_path( source, id );
         if Self::is_complete( &root_path ) { Ok( Self {
             id,
@@ -102,14 +102,14 @@ impl RawInterfaceData {
         }) } else { Err( DiscoveryError::InterfaceNotInCache( id ))}
     }
 
-    #[inline] fn root_path( source: &PathBuf, id: InterfaceId ) -> PathBuf { source.join( id.to_string() )}
-    #[inline] fn is_complete( root_path: &PathBuf ) -> bool {
+    #[inline] fn root_path( source: &Path, id: InterfaceId ) -> PathBuf { source.join( id.to_string() )}
+    #[inline] fn is_complete( root_path: &Path ) -> bool {
         Self::wit_path( root_path ).is_file()
         && Self::manifest_path( root_path ).is_file()
     }
 
-    #[inline] fn wit_path( root_path: &PathBuf ) -> PathBuf { root_path.join( Self::WIT_FILE )}
-    #[inline] fn manifest_path( root_path: &PathBuf ) -> PathBuf {
+    #[inline] fn wit_path( root_path: &Path ) -> PathBuf { root_path.join( Self::WIT_FILE )}
+    #[inline] fn manifest_path( root_path: &Path ) -> PathBuf {
         #[cfg( not( feature = "test" ))] {
             root_path.join( Self::MANIFEST_FILE )
         }
@@ -126,9 +126,9 @@ impl RawInterfaceData {
     #[inline] pub fn get_functions( &self ) -> Vec<&FunctionData> { self.wit_data.functions.values().collect() }
     #[inline] pub fn get_resources( &self ) -> &Vec<String> { &self.wit_data.resources }
 
-    #[inline] fn get_manifest_data( root_path: &PathBuf ) -> Result<Vec<u8>, InterfaceParseError> {
+    #[inline] fn get_manifest_data( root_path: &Path ) -> Result<Vec<u8>, InterfaceParseError> {
         #[cfg( not( feature = "test" ))] {
-            std::fs::read( Self::manifest_path( &root_path )).map_err( InterfaceParseError::Io )
+            std::fs::read( Self::manifest_path( root_path )).map_err( InterfaceParseError::Io )
         }
         #[cfg( feature = "test" )] {
             let bin_path = root_path.join( Self::MANIFEST_FILE );
@@ -151,8 +151,7 @@ impl RawInterfaceData {
     #[inline] fn parse_wit( root_path: &PathBuf ) -> Result<InterfaceWitData, InterfaceParseError> {
 
         let mut resolve = Resolve::new();
-        let _ = resolve.push_path( AsRef::<Path>::as_ref( &root_path ))
-            .map_err(| err | InterfaceParseError::WitParser( err ))?;
+        let _ = resolve.push_path( AsRef::<Path>::as_ref( &root_path )).map_err( InterfaceParseError::WitParser )?;
 
         let interface = resolve.interfaces.iter().find(|( _, interface )| match &interface.name {
             Some( name ) => name.as_str() == Self::ROOT_INTERFACE ,
@@ -172,7 +171,7 @@ impl RawInterfaceData {
             .collect::<Result<_,InterfaceParseError>>()?;
 
         let resources = interface.types.iter().filter_map(|( name, wit_type_id )| match resolve.types.get( *wit_type_id ) {
-            Option::None => Some( Err( InterfaceParseError::UndeclaredType( wit_type_id.clone() ) )),
+            Option::None => Some( Err( InterfaceParseError::UndeclaredType( *wit_type_id ) )),
             Some( wit_type ) if wit_type.kind == wit_parser::TypeDefKind::Resource => Some( Ok( name.to_string() )),
             _ => None,
         }).collect::<Result<_, InterfaceParseError>>()?;

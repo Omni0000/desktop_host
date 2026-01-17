@@ -1,4 +1,4 @@
-use std::path::PathBuf ;
+use std::path::{ Path, PathBuf };
 use std::io::Cursor ;
 use capnp::message::ReaderOptions;
 use capnp::serialize ;
@@ -38,17 +38,17 @@ impl RawPluginData {
     
     const WASM_FILE: &str = "root.wasm" ;
     const MANIFEST_FILE: &str = "manifest.bin" ;
-    /* TEST */ const WAT_FILE: &str = "root.wat" ;
-    /* TEST */ const MANIFEST_TOML_FILE: &str = "manifest.toml" ;
+    #[cfg( feature = "test" )] const WAT_FILE: &str = "root.wat" ;
+    #[cfg( feature = "test" )] const MANIFEST_TOML_FILE: &str = "manifest.toml" ;
 
-    pub fn new( source: &PathBuf, id: &PluginId ) -> Result<Self, DiscoveryError> {
+    pub fn new( source: &Path, id: &PluginId ) -> Result<Self, DiscoveryError> {
         let root_path = Self::root_path( source, id );
         if Self::is_complete( &root_path ) { Ok( Self { id: id.clone(), root_path, manifest_data: None } )}
         else { Err( DiscoveryError::PluginNotInCache( id.clone() )) }
     }
 
-    #[inline] fn root_path( source: &PathBuf, id: &PluginId ) -> PathBuf { source.join( id.to_string() )}
-    #[inline] fn is_complete( root_path: &PathBuf ) -> bool {
+    #[inline] fn root_path( source: &Path, id: &PluginId ) -> PathBuf { source.join( id )}
+    #[inline] fn is_complete( root_path: &Path ) -> bool {
         Self::_wasm_path( root_path ).is_file()
         && Self::_manifest_path( root_path ).is_file()
     }
@@ -77,7 +77,7 @@ impl RawPluginData {
             }
         }? )))
     }
-    #[inline] fn _manifest_path( root_path: &PathBuf ) -> PathBuf {
+    #[inline] fn _manifest_path( root_path: &Path ) -> PathBuf {
         #[cfg( not( feature = "test" ))] {
             root_path.join( Self::MANIFEST_FILE )
         }
@@ -89,10 +89,11 @@ impl RawPluginData {
     }
 
     #[inline] pub fn wasm_path( &self ) -> PathBuf { Self::_wasm_path( &self.root_path )}
-    #[inline] fn _wasm_path( root_path: &PathBuf ) -> PathBuf {
-        if !cfg!( feature = "test" ) {
+    #[inline] fn _wasm_path( root_path: &Path ) -> PathBuf {
+        #[cfg( not( feature = "test" ))] {
             root_path.join( Self::WASM_FILE )
-        } else {
+        }
+        #[cfg( feature = "test" )] {
             let bin_path = root_path.join( Self::WASM_FILE );
             if bin_path.is_file() { bin_path }
             else { root_path.join( Self::WAT_FILE )}
