@@ -12,8 +12,8 @@ use wasmtime::component::{ Linker, Val };
 use crate::{ Interface, PluginContext };
 use crate::cardinality::{ Any, AtLeastOne, AtMostOne, Cardinality, ExactlyOne };
 use crate::plugin_instance::{
-	AsyncDispatchInstance, DispatchDriver, ExportEffectInstance, PluginInstanceAsync,
-	PluginInstanceSync,
+	AsyncDispatchInstance, AsyncLinkContext, DispatchSession, ExportEffectInstance,
+	PluginInstanceAsync, PluginInstanceSync,
 };
 
 
@@ -379,12 +379,13 @@ where
 			.ok_or_else(|| crate::DispatchError::InvalidFunction( function_name.to_string() ))?;
 		let package_name = self.0.package_name.as_str();
 
-		let driver = DispatchDriver::current().unwrap_or_else( DispatchDriver::new );
+		let session = DispatchSession::new();
 		let dispatch = self.0.plugins.map_async(| _, plugin | {
-			let driver = Arc::clone( &driver );
+			let session = Arc::clone( &session );
 			async move {
 				plugin.dispatch_async_from(
-					&driver,
+					&session,
+					session.external_caller(),
 					package_name,
 					interface_name,
 					function_name,
@@ -393,7 +394,7 @@ where
 				).await
 			}
 		});
-		Ok( driver.run( dispatch ).await )
+		Ok( session.run( dispatch ).await )
 	}
 
 }
@@ -401,6 +402,7 @@ where
 fn add_to_linker_async<PluginId, Ctx, Plugins, Instance>(
 	binding: &Binding<PluginId, Ctx, Plugins, Instance>,
 	linker: &mut Linker<Ctx>,
+	link_context: &AsyncLinkContext,
 ) -> Result<(), wasmtime::Error>
 where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
@@ -415,7 +417,7 @@ where
 	binding.0.interfaces.iter().try_for_each(|( name, interface )| {
 		let interface_ident = format!( "{}/{}", binding.0.package_name, name );
 		interface.add_to_linker_async(
-			linker, &binding.0.package_name, &interface_ident, name, binding,
+			linker, &binding.0.package_name, &interface_ident, name, binding, link_context,
 		)
 	})
 }
@@ -457,12 +459,13 @@ where
 	pub(crate) fn add_to_linker_async(
 		&self,
 		linker: &mut Linker<Ctx>,
+		link_context: &AsyncLinkContext,
 	) -> Result<(), wasmtime::Error> {
 		match self {
-			Self::ExactlyOne( binding ) => add_to_linker_async( binding, linker ),
-			Self::AtMostOne( binding ) => add_to_linker_async( binding, linker ),
-			Self::AtLeastOne( binding ) => add_to_linker_async( binding, linker ),
-			Self::Any( binding ) => add_to_linker_async( binding, linker ),
+			Self::ExactlyOne( binding ) => add_to_linker_async( binding, linker, link_context ),
+			Self::AtMostOne( binding ) => add_to_linker_async( binding, linker, link_context ),
+			Self::AtLeastOne( binding ) => add_to_linker_async( binding, linker, link_context ),
+			Self::Any( binding ) => add_to_linker_async( binding, linker, link_context ),
 		}
 	}
 
@@ -476,12 +479,13 @@ where
 	pub(crate) fn add_to_linker_async(
 		&self,
 		linker: &mut Linker<Ctx>,
+		link_context: &AsyncLinkContext,
 	) -> Result<(), wasmtime::Error> {
 		match self {
-			Self::ExactlyOne( binding ) => add_to_linker_async( binding, linker ),
-			Self::AtMostOne( binding ) => add_to_linker_async( binding, linker ),
-			Self::AtLeastOne( binding ) => add_to_linker_async( binding, linker ),
-			Self::Any( binding ) => add_to_linker_async( binding, linker ),
+			Self::ExactlyOne( binding ) => add_to_linker_async( binding, linker, link_context ),
+			Self::AtMostOne( binding ) => add_to_linker_async( binding, linker, link_context ),
+			Self::AtLeastOne( binding ) => add_to_linker_async( binding, linker, link_context ),
+			Self::Any( binding ) => add_to_linker_async( binding, linker, link_context ),
 		}
 	}
 }
@@ -524,10 +528,11 @@ where
 	pub(crate) fn add_to_linker(
 		&self,
 		linker: &mut Linker<Ctx>,
+		link_context: &AsyncLinkContext,
 	) -> Result<(), wasmtime::Error> {
 		match self {
-			Self::Sync( binding ) => binding.add_to_linker_async( linker ),
-			Self::Async( binding ) => binding.add_to_linker_async( linker ),
+			Self::Sync( binding ) => binding.add_to_linker_async( linker, link_context ),
+			Self::Async( binding ) => binding.add_to_linker_async( linker, link_context ),
 		}
 	}
 }

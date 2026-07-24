@@ -49,7 +49,7 @@ fn async_debug_output_exposes_configuration_without_component_internals() -> Res
 		let bindings = fixtures::bindings();
 		let plugin_instance = plugins.plugin.plugin.instantiate_async( &engine, &linker ).await?;
 		let instance_debug = format!( "{plugin_instance:?}" );
-		assert!( instance_debug.contains( "state: \"<serialized store>\"" ));
+		assert!( instance_debug.contains( "state: \"<cooperatively dispatched store>\"" ));
 		let binding: Binding<
 			String,
 			TestContext,

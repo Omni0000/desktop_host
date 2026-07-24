@@ -14,7 +14,7 @@ use crate::linker::{
 	dispatch_method_async_blocking,
 };
 use crate::resource_wrapper::ResourceWrapper ;
-use crate::plugin_instance::{ AsyncDispatchInstance, DispatchDriver };
+use crate::plugin_instance::{ AsyncDispatchInstance, AsyncLinkContext };
 
 /// A single WIT interface within a [`Binding`].
 ///
@@ -124,6 +124,7 @@ impl Interface {
 		interface_ident: &str,
 		interface_name: &str,
 		binding: &Binding<PluginId, Ctx, Plugins, Instance>,
+		link_context: &AsyncLinkContext,
 	) -> Result<(), wasmtime::Error>
 	where
 		PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
@@ -145,6 +146,7 @@ impl Interface {
 			let binding = binding.clone();
 			let function_name = name.clone();
 			let function = metadata.clone();
+			let link_context = link_context.clone();
 
 			macro_rules! link_concurrent {( $dispatch: expr ) => {
 				linker_instance.func_new_concurrent( name, move | ctx, _ty, args, results | {
@@ -153,11 +155,12 @@ impl Interface {
 					let binding = binding.clone();
 					let function_name = function_name.clone();
 					let function = function.clone();
+					let link_context = link_context.clone();
 					Box::pin( async move {
-						let driver = DispatchDriver::current()
-							.ok_or( wasmtime::Error::msg( "async dispatch driver is not active" ))?;
+						let session = link_context.session_slot.current()
+							.ok_or( wasmtime::Error::msg( "async dispatch session is not active" ))?;
 						results[0] = $dispatch(
-							&binding, &driver, ctx, &package_name,
+							&binding, &session, &link_context.caller, ctx, &package_name,
 							&interface_name, &function_name, &function, args,
 						).await;
 						Ok(())
@@ -172,11 +175,12 @@ impl Interface {
 					let binding = binding.clone();
 					let function_name = function_name.clone();
 					let function = function.clone();
+					let link_context = link_context.clone();
 					Box::new( async move {
-						let driver = DispatchDriver::current()
-							.ok_or( wasmtime::Error::msg( "async dispatch driver is not active" ))?;
+						let session = link_context.session_slot.current()
+							.ok_or( wasmtime::Error::msg( "async dispatch session is not active" ))?;
 						results[0] = $dispatch(
-							&binding, &driver, ctx, &package_name,
+							&binding, &session, &link_context.caller, ctx, &package_name,
 							&interface_name, &function_name, &function, args,
 						).await;
 						Ok(())

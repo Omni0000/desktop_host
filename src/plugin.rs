@@ -10,7 +10,7 @@ use wasmtime::{ Engine, Store };
 use wasmtime::component::{ Component, ResourceTable, Linker, Val };
 
 use crate::{ BindingAny, SocketBindingAny };
-use crate::plugin_instance::{ PluginInstanceAsync, PluginInstanceSync };
+use crate::plugin_instance::{ AsyncLinkContext, PluginInstanceAsync, PluginInstanceSync };
 use crate::Function ;
 use crate::Remap ;
 
@@ -338,10 +338,11 @@ where
 		Sockets: IntoIterator,
 		Sockets::Item: Into<SocketBindingAny<PluginId, Ctx>>,
 	{
+		let link_context = AsyncLinkContext::new();
 		sockets.into_iter()
 			.map( Into::into )
-			.try_for_each(| binding | binding.add_to_linker( &mut linker ))?;
-		self.instantiate_async( engine, &linker ).await
+			.try_for_each(| binding | binding.add_to_linker( &mut linker, &link_context ))?;
+		self.instantiate_async_with( engine, &linker, link_context ).await
 	}
 
 	/// A convenience alias for [`Plugin::link`] with 0 sockets
@@ -402,6 +403,15 @@ where
 		linker: &Linker<Ctx>,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error>
 	{
+		self.instantiate_async_with( engine, linker, AsyncLinkContext::new() ).await
+	}
+
+	async fn instantiate_async_with(
+		self,
+		engine: &Engine,
+		linker: &Linker<Ctx>,
+		link_context: AsyncLinkContext,
+	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
 		let mut store = Store::new( engine, self.context );
 		if let Some( fuel ) = self.initial_fuel { store.set_fuel( fuel )?; }
 		if let Some( limiter ) = self.memory_limiter { store.limiter( limiter ); }
@@ -414,6 +424,7 @@ where
 			self.fuel_limiter,
 			self.epoch_limiter,
 			async_exports,
+			link_context,
 		))
 	}
 
