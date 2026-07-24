@@ -16,6 +16,10 @@ use crate::linker::{
 use crate::resource_wrapper::ResourceWrapper ;
 use crate::plugin_instance::{ AsyncDispatchInstance, AsyncLinkContext };
 
+fn missing_dispatch_session() -> wasmtime::Error {
+	wasmtime::Error::msg( "async dispatch session is not active" )
+}
+
 /// A single WIT interface within a [`Binding`].
 ///
 /// Each interface declares functions and resources that implementers must export.
@@ -158,7 +162,7 @@ impl Interface {
 					let link_context = link_context.clone();
 					Box::pin( async move {
 						let session = link_context.session_slot.current()
-							.ok_or( wasmtime::Error::msg( "async dispatch session is not active" ))?;
+							.ok_or_else( missing_dispatch_session )?;
 						results[0] = $dispatch(
 							&binding, &session, &link_context.caller, ctx, &package_name,
 							&interface_name, &function_name, &function, args,
@@ -178,7 +182,7 @@ impl Interface {
 					let link_context = link_context.clone();
 					Box::new( async move {
 						let session = link_context.session_slot.current()
-							.ok_or( wasmtime::Error::msg( "async dispatch session is not active" ))?;
+							.ok_or_else( missing_dispatch_session )?;
 						results[0] = $dispatch(
 							&binding, &session, &link_context.caller, ctx, &package_name,
 							&interface_name, &function_name, &function, args,
@@ -288,5 +292,16 @@ impl std::fmt::Display for ReturnKind {
 			Self::MayContainResources => write!( f, "Return type may contain resources" ),
 			Self::AssumeNoResources => write!( f, "Function is assumed to not return any resources" ),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn missing_dispatch_session_error_explains_the_invariant() {
+		assert_eq!(
+			super::missing_dispatch_session().to_string(),
+			"async dispatch session is not active",
+		);
 	}
 }

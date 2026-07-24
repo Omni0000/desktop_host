@@ -2,7 +2,7 @@ use wasmtime::{ Config, Engine, Store };
 use wasmtime::component::{ Component, FutureReader, Linker, ResourceTable, StreamReader, Val };
 
 use super::{
-	CallRequest, CallerToken, DispatchQueue, DispatchSession, InstanceDispatcher,
+	CallRequest, CallResponse, CallerToken, DispatchQueue, DispatchSession, InstanceDispatcher,
 	PluginInstanceAsync, PluginInstanceSync, SessionBatch, SessionSlot, ensure_supported_value,
 };
 use crate::{ DispatchError, PluginContext };
@@ -93,7 +93,7 @@ fn request( name: &str ) -> CallRequest {
 			crate::ReturnKind::AssumeNoResources,
 		),
 		data: Vec::new(),
-		response,
+		response: CallResponse::new( response ),
 	}
 }
 
@@ -209,4 +209,37 @@ fn unpolled_batch_does_not_retain_its_cancelled_session() {
 		.expect( "spawned batch should be queued" );
 	drop( session );
 	futures::executor::block_on( future );
+}
+
+#[test]
+fn concurrent_store_errors_reach_admitted_and_queued_calls() {
+	futures::executor::block_on( async {
+		let dispatcher = empty_dispatcher();
+		let session = DispatchSession::new();
+		let ( admitted_sender, admitted_result ) = futures::channel::oneshot::channel();
+		let admitted = CallResponse::new( admitted_sender );
+		let ( queued_sender, queued_result ) = futures::channel::oneshot::channel();
+		let mut queued = request( "queued" );
+		queued.response = CallResponse::new( queued_sender );
+		{
+			let mut queue = super::lock_unpoisoned( &dispatcher.queue );
+			let mut batch = SessionBatch::new( &session );
+			batch.push( CallerToken::new(), queued );
+			queue.active = Some( batch );
+		}
+
+		dispatcher.finish_concurrent_batch(
+			&session,
+			vec![ admitted ],
+			Err( wasmtime::Error::msg( "store task failed" )),
+		);
+
+		for result in [ admitted_result.await, queued_result.await ] {
+			assert!( matches!(
+				result,
+				Ok( Err( DispatchError::RuntimeException( error )))
+					if error.to_string() == "store task failed"
+			));
+		}
+	});
 }

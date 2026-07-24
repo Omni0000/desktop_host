@@ -204,7 +204,23 @@ struct CallRequest {
 	function_name: String,
 	function: Function,
 	data: Vec<Val>,
-	response: futures::channel::oneshot::Sender<Result<Val, DispatchError>>,
+	response: Arc<CallResponse>,
+}
+
+struct CallResponse {
+	sender: std::sync::Mutex<Option<futures::channel::oneshot::Sender<Result<Val, DispatchError>>>>,
+}
+
+impl CallResponse {
+	fn new( sender: futures::channel::oneshot::Sender<Result<Val, DispatchError>> ) -> Arc<Self> {
+		Arc::new( Self { sender: std::sync::Mutex::new( Some( sender ))})
+	}
+
+	fn send( &self, result: Result<Val, DispatchError> ) {
+		if let Some( sender ) = lock_unpoisoned( &self.sender ).take() {
+			let _ = sender.send( result );
+		}
+	}
 }
 
 struct PluginState<Ctx: 'static> {
@@ -423,7 +439,7 @@ where
 				function_name: function_name.to_string(),
 				function: function.clone(),
 				data: data.to_vec(),
-				response,
+				response: CallResponse::new( response ),
 			},
 		);
 		result.await.map_err(| _ | DispatchError::MissingResponse )?
@@ -657,7 +673,7 @@ where
 					&request.function,
 					&request.data,
 				).await;
-				let _ = request.response.send( result );
+				request.response.send( result );
 				continue;
 			}
 			let _ = self.begin_closing( session );
@@ -672,10 +688,12 @@ where
 	) {
 		let instance = state.instance;
 		let metadata = Arc::clone( &state.metadata );
-		let _ = state.store.run_concurrent( async | accessor | {
+		let mut admitted = Vec::new();
+		let result = state.store.run_concurrent( async | accessor | {
 			let mut calls = FuturesUnordered::<BoxFuture<'_, ()>>::new();
 			loop {
 				while let Some( request ) = self.pop_request( session ) {
+					admitted.push( Arc::clone( &request.response ));
 					calls.push( concurrent_call(
 						accessor,
 						instance,
@@ -698,6 +716,34 @@ where
 				}
 			}
 		}).await;
+		self.finish_concurrent_batch( session, admitted, result );
+	}
+
+	fn finish_concurrent_batch(
+		&self,
+		session: &Arc<DispatchSession>,
+		mut admitted: Vec<Arc<CallResponse>>,
+		result: wasmtime::Result<()>,
+	) {
+		let Err( error ) = result else { return };
+		let queued = {
+			let mut queue = lock_unpoisoned( &self.queue );
+			queue.active.as_mut()
+				.filter(| active | active.belongs_to( session ))
+				.map(| active | active.callers.drain( .. )
+					.flat_map(| caller | caller.requests )
+					.map(| request | request.response )
+					.collect::<Vec<_>>()
+				)
+				.unwrap_or_default()
+		};
+		admitted.extend( queued );
+		let message = error.to_string();
+		for response in admitted {
+			response.send( Err( DispatchError::RuntimeException(
+				wasmtime::Error::msg( message.clone() ),
+			)));
+		}
 	}
 
 	fn finish_batch( self: &Arc<Self> ) {
@@ -760,7 +806,7 @@ where
 			}
 			Err( error ) => Err( error ),
 		};
-		let _ = request.response.send( result );
+		request.response.send( result );
 	})
 }
 
