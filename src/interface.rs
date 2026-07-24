@@ -1,9 +1,9 @@
 use std::sync::Arc ;
 use std::collections::{ HashMap, HashSet };
-use futures::lock::Mutex ;
 use wasmtime::component::{ Linker, ResourceType, Val };
 
-use crate::{ Binding, PluginContext, PluginInstanceAsync, PluginInstanceSync };
+use crate::{ Binding, PluginContext, PluginInstanceSync };
+use crate::binding::ExportEffects ;
 use crate::cardinality::Cardinality ;
 use crate::linker::{
 	dispatch_all,
@@ -14,6 +14,11 @@ use crate::linker::{
 	dispatch_method_async_blocking,
 };
 use crate::resource_wrapper::ResourceWrapper ;
+use crate::plugin_instance::{ AsyncDispatchInstance, AsyncLinkContext };
+
+fn missing_dispatch_session() -> wasmtime::Error {
+	wasmtime::Error::msg( "async dispatch session is not active" )
+}
 
 /// A single WIT interface within a [`Binding`].
 ///
@@ -75,9 +80,9 @@ impl Interface {
 		PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
 		Ctx: PluginContext,
 		Plugins: Cardinality<PluginId, PluginInstanceSync<Ctx>> + 'static,
-		<Plugins as Cardinality<PluginId, PluginInstanceSync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceSync<Ctx>>>>: Send + Sync,
-		<Plugins as Cardinality<PluginId, PluginInstanceSync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceSync<Ctx>>>>: Cardinality<PluginId, Arc<Mutex<PluginInstanceSync<Ctx>>>>,
-		<<Plugins as Cardinality<PluginId, PluginInstanceSync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceSync<Ctx>>>> as Cardinality<PluginId, Arc<Mutex<PluginInstanceSync<Ctx>>>>>::Rebind<Val>: Into<Val>,
+		<Plugins as Cardinality<PluginId, PluginInstanceSync<Ctx>>>::Rebind<Arc<PluginInstanceSync<Ctx>>>: Send + Sync,
+		<Plugins as Cardinality<PluginId, PluginInstanceSync<Ctx>>>::Rebind<Arc<PluginInstanceSync<Ctx>>>: Cardinality<PluginId, Arc<PluginInstanceSync<Ctx>>>,
+		<<Plugins as Cardinality<PluginId, PluginInstanceSync<Ctx>>>::Rebind<Arc<PluginInstanceSync<Ctx>>> as Cardinality<PluginId, Arc<PluginInstanceSync<Ctx>>>>::Rebind<Val>: Into<Val>,
 	{
 		let mut linker_root = linker.root();
 		let mut linker_instance = linker_root.instance( interface_ident )?;
@@ -92,7 +97,10 @@ impl Interface {
 
 			macro_rules! link {( $dispatch: expr ) => {
 				linker_instance.func_new( name, move | ctx, _ty, args, results | Ok(
-					results[0] = $dispatch( &binding_clone, ctx, &package_name_clone, &interface_name_clone, &name_clone, &metadata_clone, args )
+					results[0] = $dispatch(
+						&binding_clone, ctx, &package_name_clone,
+						&interface_name_clone, &name_clone, &metadata_clone, args,
+					)
 				))
 			}}
 
@@ -112,31 +120,37 @@ impl Interface {
 	}
 
 	#[inline]
-	pub(crate) fn add_to_linker_async<PluginId, Ctx, Plugins>(
+	#[allow( clippy::too_many_arguments )]
+	pub(crate) fn add_to_linker_async<PluginId, Ctx, Plugins, Instance>(
 		&self,
 		linker: &mut Linker<Ctx>,
 		package_name: &str,
 		interface_ident: &str,
 		interface_name: &str,
-		binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
+		binding: &Binding<PluginId, Ctx, Plugins, Instance>,
+		link_context: &AsyncLinkContext,
 	) -> Result<(), wasmtime::Error>
 	where
 		PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
 		Ctx: PluginContext,
-		Plugins: Cardinality<PluginId, PluginInstanceAsync<Ctx>> + 'static,
-		<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>>: Send + Sync,
-		<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>>: Cardinality<PluginId, Arc<Mutex<PluginInstanceAsync<Ctx>>>>,
-		<<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>> as Cardinality<PluginId, Arc<Mutex<PluginInstanceAsync<Ctx>>>>>::Rebind<Val>: Into<Val> + Send,
+		Instance: AsyncDispatchInstance<Ctx>,
+		Plugins: Cardinality<PluginId, Instance> + 'static,
+		<Plugins as Cardinality<PluginId, Instance>>::Rebind<Arc<Instance>>: Send + Sync,
+		<Plugins as Cardinality<PluginId, Instance>>::Rebind<Arc<Instance>>: Cardinality<PluginId, Arc<Instance>>,
+		<Plugins as Cardinality<PluginId, Instance>>::Rebind<Arc<Instance>>: ExportEffects,
+		<<Plugins as Cardinality<PluginId, Instance>>::Rebind<Arc<Instance>> as Cardinality<PluginId, Arc<Instance>>>::Rebind<Val>: Into<Val> + Send,
 	{
 		let mut linker_root = linker.root();
 		let mut linker_instance = linker_root.instance( interface_ident )?;
 
 		self.functions.iter().try_for_each(|( name, metadata )| {
+			let is_async = binding.has_async_export( interface_name, name ).unwrap_or( false );
 			let package_name = package_name.to_string();
 			let interface_name = interface_name.to_string();
 			let binding = binding.clone();
 			let function_name = name.clone();
 			let function = metadata.clone();
+			let link_context = link_context.clone();
 
 			macro_rules! link_concurrent {( $dispatch: expr ) => {
 				linker_instance.func_new_concurrent( name, move | ctx, _ty, args, results | {
@@ -145,9 +159,13 @@ impl Interface {
 					let binding = binding.clone();
 					let function_name = function_name.clone();
 					let function = function.clone();
+					let link_context = link_context.clone();
 					Box::pin( async move {
+						let session = link_context.session_slot.current()
+							.ok_or_else( missing_dispatch_session )?;
 						results[0] = $dispatch(
-							&binding, ctx, &package_name, &interface_name, &function_name, &function, args,
+							&binding, &session, &link_context.caller, ctx, &package_name,
+							&interface_name, &function_name, &function, args,
 						).await;
 						Ok(())
 					})
@@ -161,16 +179,20 @@ impl Interface {
 					let binding = binding.clone();
 					let function_name = function_name.clone();
 					let function = function.clone();
+					let link_context = link_context.clone();
 					Box::new( async move {
+						let session = link_context.session_slot.current()
+							.ok_or_else( missing_dispatch_session )?;
 						results[0] = $dispatch(
-							&binding, ctx, &package_name, &interface_name, &function_name, &function, args,
+							&binding, &session, &link_context.caller, ctx, &package_name,
+							&interface_name, &function_name, &function, args,
 						).await;
 						Ok(())
 					})
 				})
 			}}
 
-			match ( metadata.is_async(), metadata.kind() ) {
+			match ( is_async, metadata.kind() ) {
 				( true, FunctionKind::Freestanding ) => link_concurrent!( dispatch_all_async ),
 				( true, FunctionKind::Method ) => link_concurrent!( dispatch_method_async ),
 				( false, FunctionKind::Freestanding ) => link_blocking!( dispatch_all_async_blocking ),
@@ -208,8 +230,6 @@ pub struct Function {
 	kind: FunctionKind,
 	/// The function's return kind for dispatch handling
 	return_kind: ReturnKind,
-	/// Whether the WIT function is declared with the `async` effect.
-	is_async: bool,
 }
 
 impl Function {
@@ -218,25 +238,7 @@ impl Function {
 		kind: FunctionKind,
 		return_kind: ReturnKind,
 	) -> Self {
-		Self { kind, return_kind, is_async: false }
-	}
-
-	/// Creates metadata for a WIT function declared with the `async` effect.
-	///
-	/// ```
-	/// use wasm_link::{ Function, FunctionKind, ReturnKind };
-	///
-	/// let function = Function::new_async(
-	/// 	FunctionKind::Freestanding,
-	/// 	ReturnKind::MayContainResources,
-	/// );
-	/// assert!( function.is_async() );
-	/// ```
-	pub fn new_async(
-		kind: FunctionKind,
-		return_kind: ReturnKind,
-	) -> Self {
-		Self { kind, return_kind, is_async: true }
+		Self { kind, return_kind }
 	}
 
 	/// The function's return kind for dispatch handling.
@@ -244,15 +246,6 @@ impl Function {
 
 	/// Whether this function is freestanding or a resource method.
 	pub fn kind( &self ) -> FunctionKind { self.kind }
-
-	/// Whether the WIT function is declared with the `async` effect.
-	///
-	/// ```
-	/// # use wasm_link::{ Function, FunctionKind, ReturnKind };
-	/// let function = Function::new( FunctionKind::Freestanding, ReturnKind::Void );
-	/// assert!( !function.is_async() );
-	/// ```
-	pub fn is_async( &self ) -> bool { self.is_async }
 
 }
 
@@ -299,5 +292,16 @@ impl std::fmt::Display for ReturnKind {
 			Self::MayContainResources => write!( f, "Return type may contain resources" ),
 			Self::AssumeNoResources => write!( f, "Function is assumed to not return any resources" ),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn missing_dispatch_session_error_explains_the_invariant() {
+		assert_eq!(
+			super::missing_dispatch_session().to_string(),
+			"async dispatch session is not active",
+		);
 	}
 }

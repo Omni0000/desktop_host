@@ -1,14 +1,12 @@
 (component
 	(type $child-interface (instance
 		(type $dispatch-error' (variant
-			(case "lock-rejected")
 			(case "invalid-interface-path" string)
 			(case "invalid-function" string)
 			(case "missing-response")
 			(case "runtime-exception" string)
 			(case "invalid-argument-list")
 			(case "unsupported-type" string)
-			(case "executor-unavailable")
 			(case "resource-table-full")
 			(case "resource-handle-conversion-failed")
 			(case "invalid-resource-handle")

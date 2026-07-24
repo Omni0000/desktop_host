@@ -22,4 +22,6 @@ include!( "test_utils/assert_no_warnings.rs" );
 	mod remap_interface_and_item_names ;
 	mod remap_mixed_plugin_export_names ;
 	mod type_erased_binding_cardinality ;
+	mod dispatch_serialization ;
+	mod concurrent_shared_dependency ;
 }

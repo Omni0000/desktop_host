@@ -1,0 +1,5 @@
+package test:concurrent-branch;
+
+interface root {
+	run: async func() -> u32;
+}

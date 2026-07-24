@@ -5,13 +5,12 @@
 //! (its **sockets**). The plug declares what the plugin exports; sockets declare what
 //! the plugin expects to import from other plugins.
 
-use std::collections::HashMap ;
+use std::collections::{ HashMap, HashSet };
 use wasmtime::{ Engine, Store };
 use wasmtime::component::{ Component, ResourceTable, Linker, Val };
-use futures::task::Spawn ;
 
-use crate::BindingAny ;
-use crate::plugin_instance::{ PluginInstanceAsync, PluginInstanceSync };
+use crate::{ BindingAny, SocketBindingAny };
+use crate::plugin_instance::{ AsyncLinkContext, PluginInstanceAsync, PluginInstanceSync };
 use crate::Function ;
 use crate::Remap ;
 
@@ -302,30 +301,25 @@ where
 	/// Asynchronously links this plugin with its socket bindings and instantiates it.
 	///
 	/// Use this variant when any socket may suspend or uses Component Model async types.
-	/// Every plugin in an asynchronously linked graph should be created with
-	/// [`instantiate_async`](Self::instantiate_async) or `link_async`.
-	/// Calls to the returned instance are submitted to `executor`, allowing a
-	/// thread pool to drive many independent plugin stores without reserving a
-	/// worker for each plugin.
+	/// Sockets may contain either [`PluginInstanceSync`] or [`PluginInstanceAsync`].
+	/// Explicitly heterogeneous collections use [`SocketBindingAny`].
 	///
 	/// # Example
 	///
 	/// ```
-	/// # use wasm_link::{ BindingAny, Component, Engine, Linker, Plugin, PluginContext, ResourceTable };
+	/// # use wasm_link::{ Component, Engine, Linker, Plugin, PluginContext, ResourceTable, SocketBindingAny };
 	/// # struct Context { table: ResourceTable }
 	/// # impl PluginContext for Context { fn resource_table( &mut self ) -> &mut ResourceTable { &mut self.table } }
 	/// # fn main() -> Result<(), Box<dyn std::error::Error>> { futures::executor::block_on( async {
 	/// let engine = Engine::default();
 	/// let linker = Linker::new( &engine );
-	/// let executor = futures::executor::ThreadPool::new()?;
 	/// let instance = Plugin::new(
 	/// 	Component::new( &engine, "(component)" )?,
 	/// 	Context { table: ResourceTable::new() },
 	/// ).link_async(
 	/// 	&engine,
 	/// 	linker,
-	/// 	Vec::<BindingAny<String, Context, wasm_link::PluginInstanceAsync<Context>>>::new(),
-	/// 	executor,
+	/// 	Vec::<SocketBindingAny<String, Context>>::new(),
 	/// ).await?;
 	/// # let _ = instance;
 	/// # Ok(()) }) }
@@ -333,23 +327,22 @@ where
 	///
 	/// # Errors
 	/// Returns an error if linking or instantiation fails.
-	pub async fn link_async<PluginId, Sockets, Executor>(
+	pub async fn link_async<PluginId, Sockets>(
 		self,
 		engine: &Engine,
 		mut linker: Linker<Ctx>,
 		sockets: Sockets,
-		executor: Executor,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error>
 	where
 		PluginId: Eq + std::hash::Hash + Clone + std::fmt::Debug + Send + Sync + Into<Val> + 'static,
 		Sockets: IntoIterator,
-		Sockets::Item: Into<BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>>>,
-		Executor: Spawn + Send + Sync + 'static,
+		Sockets::Item: Into<SocketBindingAny<PluginId, Ctx>>,
 	{
+		let link_context = AsyncLinkContext::new();
 		sockets.into_iter()
 			.map( Into::into )
-			.try_for_each(| binding | binding.add_to_linker_async( &mut linker ))?;
-		Self::instantiate_async( self, engine, &linker, executor ).await
+			.try_for_each(| binding | binding.add_to_linker( &mut linker, &link_context ))?;
+		self.instantiate_async_with( engine, &linker, link_context ).await
 	}
 
 	/// A convenience alias for [`Plugin::link`] with 0 sockets
@@ -365,12 +358,14 @@ where
 		if let Some( fuel ) = self.initial_fuel { store.set_fuel( fuel )?; }
 		if let Some( limiter ) = self.memory_limiter { store.limiter( limiter ); }
 		let instance = linker.instantiate( &mut store, &self.component )?;
+		let async_exports = async_exports( engine, &self.component, &instance, &mut store );
 		Ok( PluginInstanceSync::new_sync(
 			store,
 			instance,
 			self.interface_remaps,
 			self.fuel_limiter,
 			self.epoch_limiter,
+			async_exports,
 		))
 	}
 
@@ -378,9 +373,8 @@ where
 	///
 	/// This variant is required for WIT async functions, asynchronous host functions,
 	/// and plugins that will be used in a graph created with [`link_async`](Self::link_async).
-	/// Calls to the returned instance are submitted to `executor`. This keeps each
-	/// plugin's [`Store`](wasmtime::Store) isolated while allowing a thread pool to
-	/// drive many plugin stores without dedicating an idle thread to each one.
+	/// Calls to the returned instance are driven by the future returned from
+	/// [`Binding::dispatch`](crate::Binding::dispatch).
 	/// Wasmtime concurrency support, which is enabled by default, must not be disabled
 	/// on the `engine` used for asynchronous instances.
 	///
@@ -393,40 +387,65 @@ where
 	/// # fn main() -> Result<(), Box<dyn std::error::Error>> { futures::executor::block_on( async {
 	/// let engine = Engine::default();
 	/// let linker = Linker::new( &engine );
-	/// let executor = futures::executor::ThreadPool::new()?;
 	/// let instance = Plugin::new(
 	/// 	Component::new( &engine, "(component)" )?,
 	/// 	Context { table: ResourceTable::new() },
-	/// ).instantiate_async( &engine, &linker, executor ).await?;
+	/// ).instantiate_async( &engine, &linker ).await?;
 	/// # let _ = instance;
 	/// # Ok(()) }) }
 	/// ```
 	///
 	/// # Errors
 	/// Returns an error if instantiation fails.
-	pub async fn instantiate_async<Executor>(
+	pub async fn instantiate_async(
 		self,
 		engine: &Engine,
 		linker: &Linker<Ctx>,
-		executor: Executor,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error>
-	where
-		Executor: Spawn + Send + Sync + 'static,
 	{
+		self.instantiate_async_with( engine, linker, AsyncLinkContext::new() ).await
+	}
+
+	async fn instantiate_async_with(
+		self,
+		engine: &Engine,
+		linker: &Linker<Ctx>,
+		link_context: AsyncLinkContext,
+	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
 		let mut store = Store::new( engine, self.context );
 		if let Some( fuel ) = self.initial_fuel { store.set_fuel( fuel )?; }
 		if let Some( limiter ) = self.memory_limiter { store.limiter( limiter ); }
 		let instance = linker.instantiate_async( &mut store, &self.component ).await?;
+		let async_exports = async_exports( engine, &self.component, &instance, &mut store );
 		Ok( PluginInstanceAsync::new(
 			store,
 			instance,
 			self.interface_remaps,
 			self.fuel_limiter,
 			self.epoch_limiter,
-			executor,
+			async_exports,
+			link_context,
 		))
 	}
 
+}
+
+fn async_exports<Ctx>(
+	engine: &Engine,
+	component: &Component,
+	instance: &wasmtime::component::Instance,
+	store: &mut Store<Ctx>,
+) -> HashSet<(String, String)> {
+	use wasmtime::component::types::ComponentItem ;
+
+	component.component_type().exports( engine ).filter_map(|( interface_name, _ )| {
+		let ( export, _ ) = instance.get_export( &mut *store, None, interface_name )?;
+		let ComponentItem::ComponentInstance( interface ) = export else { return None };
+		Some( interface.exports( engine ).filter_map(move |( function_name, export )| {
+			let ComponentItem::ComponentFunc( function ) = export.ty else { return None };
+			function.async_().then(|| ( interface_name.to_string(), function_name.to_string() ))
+		}).collect::<Vec<_>>())
+	}).flatten().collect()
 }
 
 impl<Ctx: std::fmt::Debug + 'static> std::fmt::Debug for Plugin<Ctx> {

@@ -379,5 +379,5 @@ pub use interface::{ Interface, Function, FunctionKind, ReturnKind };
 pub use plugin::{ PluginContext, Plugin };
 pub use plugin_instance::{ PluginInstanceAsync, PluginInstanceSync, DispatchError };
 pub use remap::{ ItemResolutionTable, Remap };
-pub use binding::BindingAny ;
+pub use binding::{ BindingAny, SocketBindingAny };
 pub use resource_wrapper::{ ResourceCreationError, ResourceReceiveError };

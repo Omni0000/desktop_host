@@ -1,0 +1,5 @@
+package test:dispatch-serialization;
+
+interface root {
+	run: func(value: u32) -> tuple<u32, u32>;
+}

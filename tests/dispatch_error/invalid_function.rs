@@ -1,6 +1,7 @@
 use std::collections::{ HashMap, HashSet };
 use wasm_link::{ Binding, DispatchError, Engine, Function, FunctionKind, Interface, Linker, ReturnKind };
 use wasm_link::cardinality::ExactlyOne ;
+use wasmtime::Config ;
 
 fixtures! {
 	bindings = { root: "root" };
@@ -17,7 +18,6 @@ fn async_dispatch_error_invalid_function() -> Result<(), Box<dyn std::error::Err
 		let plugin = plugins.test_plugin.plugin.instantiate_async(
 			&engine,
 			&linker,
-			futures::executor::ThreadPool::new()?,
 		).await?;
 		let binding = Binding::new(
 			bindings.root.package,
@@ -26,7 +26,7 @@ fn async_dispatch_error_invalid_function() -> Result<(), Box<dyn std::error::Err
 		);
 
 		assert!( matches!(
-			binding.dispatch_async( "root", "nonexistent-function", &[] ).await,
+			binding.dispatch( "root", "nonexistent-function", &[] ).await,
 			Err( DispatchError::InvalidFunction( _ ))
 		));
 		Ok(())
@@ -59,6 +59,41 @@ fn plugin_dispatch_rejects_a_non_function_export() -> Result<(), wasmtime::Error
 		Ok( ExactlyOne( _, Err( DispatchError::InvalidFunction( _ ))))
 	));
 	Ok(())
+}
+
+#[test]
+fn async_plugin_dispatch_rejects_a_non_function_export_with_a_limiter() -> Result<(), Box<dyn std::error::Error>> {
+	futures::executor::block_on( async {
+		let mut config = Config::new();
+		config.consume_fuel( true );
+		let engine = Engine::new( &config )?;
+		let linker = Linker::new( &engine );
+		let plugins = fixtures::plugins( &engine );
+		let plugin = plugins.test_plugin.plugin
+			.with_fuel_limiter(| _store, _interface, _function, _metadata | 100_000 )
+			.instantiate_async( &engine, &linker )
+			.await?;
+		let binding = Binding::new(
+			"test:dispatch-error",
+			HashMap::from([(
+				"root".to_string(),
+				Interface::new(
+					HashMap::from([(
+						"not-a-function".to_string(),
+						Function::new( FunctionKind::Freestanding, ReturnKind::AssumeNoResources ),
+					)]),
+					HashSet::new(),
+				),
+			)]),
+			ExactlyOne( "_".to_string(), plugin ),
+		);
+
+		assert!( matches!(
+			binding.dispatch( "root", "not-a-function", &[] ).await,
+			Ok( ExactlyOne( _, Err( DispatchError::InvalidFunction( _ ))))
+		));
+		Ok(())
+	})
 }
 
 #[test]

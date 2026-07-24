@@ -1,0 +1,5 @@
+package test:concurrent-shared;
+
+interface root {
+	wait: async func() -> u32;
+}

@@ -12,13 +12,11 @@ fn instantiates_and_dispatches_wit_async_plugin() {
 	futures::executor::block_on( async {
 		let engine = Engine::default();
 		let linker = Linker::new( &engine );
-		let executor = futures::executor::ThreadPool::new()
-			.expect( "Failed to create async executor" );
 		let plugins = fixtures::plugins( &engine );
 		let bindings = fixtures::bindings();
 
 		let instance = plugins.plugin.plugin
-			.instantiate_async( &engine, &linker, executor )
+			.instantiate_async( &engine, &linker )
 			.await
 			.expect( "Failed to instantiate plugin asynchronously" );
 		let binding = Binding::new(
@@ -27,7 +25,7 @@ fn instantiates_and_dispatches_wit_async_plugin() {
 			ExactlyOne( "_".to_string(), instance ),
 		);
 
-		match binding.dispatch_async( "root", "get-value", &[] ).await {
+		match binding.dispatch( "root", "get-value", &[] ).await {
 			Ok( ExactlyOne( _, Ok( Val::U32( 42 )))) => {}
 			value => panic!( "Expected async dispatch to return U32(42), found: {:#?}", value ),
 		}

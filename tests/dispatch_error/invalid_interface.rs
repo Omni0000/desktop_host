@@ -17,7 +17,6 @@ fn async_dispatch_error_invalid_interface() -> Result<(), Box<dyn std::error::Er
 		let plugin = plugins.test_plugin.plugin.instantiate_async(
 			&engine,
 			&linker,
-			futures::executor::ThreadPool::new()?,
 		).await?;
 		let binding = Binding::new(
 			bindings.root.package,
@@ -26,7 +25,7 @@ fn async_dispatch_error_invalid_interface() -> Result<(), Box<dyn std::error::Er
 		);
 
 		assert!( matches!(
-			binding.dispatch_async( "nonexistent", "test", &[] ).await,
+			binding.dispatch( "nonexistent", "test", &[] ).await,
 			Err( DispatchError::InvalidInterfacePath( _ ))
 		));
 		Ok(())

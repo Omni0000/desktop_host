@@ -2,14 +2,12 @@ package test:dependant-error ;
 
 interface root {
 	variant dispatch-error {
-		lock-rejected,
 		invalid-interface-path(string),
 		invalid-function(string),
 		missing-response,
 		runtime-exception(string),
 		invalid-argument-list,
 		unsupported-type(string),
-		executor-unavailable,
 		resource-table-full,
 		resource-handle-conversion-failed,
 		invalid-resource-handle,
