@@ -658,9 +658,10 @@ where
 					&request.data,
 				).await;
 				let _ = request.response.send( result );
-			} else if self.begin_closing( session ) {
-				break;
+				continue;
 			}
+			let _ = self.begin_closing( session );
+			break;
 		}
 	}
 
@@ -671,7 +672,7 @@ where
 	) {
 		let instance = state.instance;
 		let metadata = Arc::clone( &state.metadata );
-		let result = state.store.run_concurrent( async | accessor | {
+		let _ = state.store.run_concurrent( async | accessor | {
 			let mut calls = FuturesUnordered::<BoxFuture<'_, ()>>::new();
 			loop {
 				while let Some( request ) = self.pop_request( session ) {
@@ -697,23 +698,6 @@ where
 				}
 			}
 		}).await;
-		if result.is_err() {
-			self.drop_queued_requests( session );
-		}
-	}
-
-	fn drop_queued_requests( &self, session: &Arc<DispatchSession> ) {
-		let requests = {
-			let mut queue = lock_unpoisoned( &self.queue );
-			queue.active.as_mut()
-				.filter(| active | active.belongs_to( session ))
-				.map(| active | active.callers.drain( .. )
-					.flat_map(| caller | caller.requests )
-					.collect::<Vec<_>>()
-				)
-				.unwrap_or_default()
-		};
-		drop( requests );
 	}
 
 	fn finish_batch( self: &Arc<Self> ) {
