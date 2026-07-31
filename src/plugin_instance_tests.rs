@@ -1,13 +1,49 @@
 use wasmtime::{ Config, Engine, Store };
 use wasmtime::component::{ Component, FutureReader, Linker, ResourceTable, StreamReader, Val };
 
-use super::ensure_supported_value ;
-use crate::{ DispatchError, PluginContext };
+use super::{ AsyncRequest, RequestQueues, ensure_supported_value };
+use crate::{ DispatchError, Function, FunctionKind, PluginContext, ReturnKind };
 
 struct Context { table: ResourceTable }
 
 impl PluginContext for Context {
 	fn resource_table( &mut self ) -> &mut ResourceTable { &mut self.table }
+}
+
+#[test]
+fn async_requests_are_fifo_per_caller_and_round_robin_between_callers() {
+	fn request( caller: u64, name: &str ) -> AsyncRequest {
+		let ( response, _ ) = futures::channel::oneshot::channel();
+		AsyncRequest {
+			session: 1,
+			caller,
+			package_name: String::new(),
+			interface_name: String::new(),
+			function_name: name.to_string(),
+			function: Function::new( FunctionKind::Freestanding, ReturnKind::AssumeNoResources ),
+			data: Vec::new(),
+			response,
+		}
+	}
+
+	let mut queues = RequestQueues::default();
+	queues.push( request( 1, "a1" ));
+	queues.push( request( 1, "a2" ));
+	queues.push( request( 2, "b1" ));
+	queues.push( request( 2, "b2" ));
+	let order = std::iter::from_fn(|| queues.pop().map(| request | request.function_name ))
+		.collect::<Vec<_>>();
+	assert_eq!( order, [ "a1", "b1", "a2", "b2" ]);
+}
+
+#[test]
+fn cancelled_admitted_calls_report_a_runtime_error() {
+	let ( response, result ) = futures::channel::oneshot::channel();
+	drop( super::ResponseGuard::new( response ));
+	assert!( matches!(
+		futures::executor::block_on( result ),
+		Ok( Err( DispatchError::RuntimeException( _ )))
+	));
 }
 
 #[test]

@@ -12,13 +12,11 @@ fn instantiates_and_dispatches_wit_async_plugin() {
 	futures::executor::block_on( async {
 		let engine = Engine::default();
 		let linker = Linker::new( &engine );
-		let executor = futures::executor::ThreadPool::new()
-			.expect( "Failed to create async executor" );
 		let plugins = fixtures::plugins( &engine );
 		let bindings = fixtures::bindings();
 
 		let instance = plugins.plugin.plugin
-			.instantiate_async( &engine, &linker, executor )
+			.instantiate_async( &engine, &linker )
 			.await
 			.expect( "Failed to instantiate plugin asynchronously" );
 		let binding = Binding::new(

@@ -13,6 +13,8 @@ use crate::{ Interface, PluginContext };
 use crate::cardinality::{ Any, AtLeastOne, AtMostOne, Cardinality, ExactlyOne };
 use crate::plugin_instance::{ PluginInstanceAsync, PluginInstanceSync };
 
+pub(crate) type ImportAsyncness = HashMap<String, HashMap<String, bool>>;
+
 
 
 type PluginSockets<PluginId, Plugins, Instance> =
@@ -175,6 +177,29 @@ where
 		})
 	}
 
+	pub(crate) fn add_sync_to_linker_async( binding: &Binding<PluginId, Ctx, Plugins>, linker: &mut Linker<Ctx>, imports: &ImportAsyncness ) -> Result<(), wasmtime::Error>
+	where
+		PluginId: Into<Val>,
+		DispatchVals<PluginId, Plugins, PluginInstanceSync<Ctx>>: Into<Val> + Send,
+	{
+		binding.0.interfaces.iter().try_for_each(|( name, interface )| {
+			let interface_ident = format!( "{}/{}", binding.0.package_name, name );
+			interface.add_to_linker_async_sync( linker, &binding.0.package_name, &interface_ident, name, binding, imports.get( &interface_ident ))
+		})
+	}
+
+	pub(crate) fn sync_export_is_async(
+		binding: &Binding<PluginId, Ctx, Plugins>,
+		package_name: &str,
+		interface_name: &str,
+		function_name: &str,
+	) -> Result<bool, wasmtime::Error> {
+		binding.0.plugins.try_any(| _, plugin | Ok( plugin.try_lock()
+			.ok_or_else(|| wasmtime::Error::msg( "plugin is busy during link-time export inspection" ))?
+			.export_is_async( package_name, interface_name, function_name )
+		))
+	}
+
 	/// Dispatches a function call to all plugins implementing this binding.
 	///
 	/// This is used for external dispatch (calling into the plugin graph from outside).
@@ -228,15 +253,27 @@ where
 	Plugins: Cardinality<PluginId, PluginInstanceAsync<Ctx>> + 'static,
 	PluginSockets<PluginId, Plugins, PluginInstanceAsync<Ctx>>: Cardinality<PluginId, Arc<Mutex<PluginInstanceAsync<Ctx>>>> + Send + Sync,
 {
-	pub(crate) fn add_to_linker_async( binding: &Self, linker: &mut Linker<Ctx> ) -> Result<(), wasmtime::Error>
+	pub(crate) fn add_to_linker_async( binding: &Self, linker: &mut Linker<Ctx>, caller_id: u64, imports: &ImportAsyncness ) -> Result<(), wasmtime::Error>
 	where
 		PluginId: Into<Val>,
 		DispatchVals<PluginId, Plugins, PluginInstanceAsync<Ctx>>: Into<Val> + Send,
 	{
 		binding.0.interfaces.iter().try_for_each(|( name, interface )| {
 			let interface_ident = format!( "{}/{}", binding.0.package_name, name );
-			interface.add_to_linker_async( linker, &binding.0.package_name, &interface_ident, name, binding )
+			interface.add_to_linker_async( linker, &binding.0.package_name, &interface_ident, name, binding, caller_id, imports.get( &interface_ident ))
 		})
+	}
+
+	pub(crate) fn export_is_async(
+		binding: &Self,
+		package_name: &str,
+		interface_name: &str,
+		function_name: &str,
+	) -> Result<bool, wasmtime::Error> {
+		binding.0.plugins.try_any(| _, plugin | plugin.try_lock()
+			.ok_or_else(|| wasmtime::Error::msg( "plugin is busy during link-time export inspection" ))?
+			.export_is_async( package_name, interface_name, function_name )
+		)
 	}
 
 	/// Asynchronously dispatches a function call to all plugins implementing this binding.
@@ -244,6 +281,8 @@ where
 	/// This method waits for a busy plugin instead of returning [`DispatchError::LockRejected`](crate::DispatchError::LockRejected).
 	/// It is required for instances created by [`Plugin::instantiate_async`](crate::Plugin::instantiate_async)
 	/// or [`Plugin::link_async`](crate::Plugin::link_async).
+	/// Calls made by the resulting plugin graph share one cooperative dispatch session.
+	/// Independent dispatches to the same plugin are served serially.
 	///
 	/// # Example
 	///
@@ -256,7 +295,6 @@ where
 	/// # fn main() -> Result<(), Box<dyn std::error::Error>> { futures::executor::block_on( async {
 	/// # let engine = Engine::default();
 	/// # let linker = Linker::new( &engine );
-	/// # let executor = futures::executor::ThreadPool::new()?;
 	/// # let component = Component::new( &engine, r#"(component
 	/// # 	(core module $m (func (export "get") (result i32) i32.const 42))
 	/// # 	(core instance $i (instantiate $m))
@@ -265,7 +303,7 @@ where
 	/// # 	(export "example:plugin/root" (instance $root))
 	/// # )"# )?;
 	/// # let plugin = Plugin::new( component, Context { table: ResourceTable::new() })
-	/// # 	.instantiate_async( &engine, &linker, executor ).await?;
+	/// # 	.instantiate_async( &engine, &linker ).await?;
 	/// # let binding = Binding::new(
 	/// # 	"example:plugin",
 	/// # 	HashMap::from([( "root".to_string(), Interface::new(
@@ -282,6 +320,25 @@ where
 	/// # Errors
 	/// Returns an error if the interface or function is not found in this binding.
 	pub async fn dispatch_async(
+		&self,
+		interface_name: &str,
+		function_name: &str,
+		args: &[wasmtime::component::Val],
+	) -> Result<DispatchResults<PluginId, Plugins, PluginInstanceAsync<Ctx>>, crate::DispatchError>
+	where
+		PluginId: Into<Val>,
+		DispatchResults<PluginId, Plugins, PluginInstanceAsync<Ctx>>: Send,
+	{
+		let binding = self.clone();
+		let interface_name = interface_name.to_string();
+		let function_name = function_name.to_string();
+		let args = args.to_vec();
+		crate::dispatch_session::run( async move {
+			binding.dispatch_in_session( &interface_name, &function_name, &args ).await
+		}).await
+	}
+
+	async fn dispatch_in_session(
 		&self,
 		interface_name: &str,
 		function_name: &str,
@@ -308,7 +365,8 @@ where
 			let function = function.clone();
 			let args = args.clone();
 			async move {
-				plugin.lock().await.dispatch_async(
+				let instance = plugin.lock().await.clone();
+				instance.dispatch_async(
 					&package_name,
 					&interface_name,
 					&function_name,
@@ -355,6 +413,86 @@ where
 		}
 	}
 
+	pub(crate) fn add_to_linker_async( &self, linker: &mut Linker<Ctx>, imports: &ImportAsyncness ) -> Result<(), wasmtime::Error> {
+		match self {
+			Self::ExactlyOne( binding ) => Binding::add_sync_to_linker_async( binding, linker, imports ),
+			Self::AtMostOne( binding ) => Binding::add_sync_to_linker_async( binding, linker, imports ),
+			Self::AtLeastOne( binding ) => Binding::add_sync_to_linker_async( binding, linker, imports ),
+			Self::Any( binding ) => Binding::add_sync_to_linker_async( binding, linker, imports ),
+		}
+	}
+
+}
+
+/// Type-erased socket accepted by [`Plugin::link_async`](crate::Plugin::link_async).
+///
+/// This can hold either a synchronous binding or an asynchronously dispatchable
+/// binding, allowing both kinds to appear in one socket list.
+#[derive( Debug )]
+pub enum BindingAnyAsync<PluginId, Ctx>
+where
+	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+	Ctx: PluginContext + 'static,
+{
+	/// A binding whose plugin instances are synchronously instantiated.
+	Sync( BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>> ),
+	/// A binding whose plugin instances support asynchronous dispatch.
+	Async( BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>> ),
+}
+
+impl<PluginId, Ctx> BindingAnyAsync<PluginId, Ctx>
+where
+	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
+	Ctx: PluginContext + 'static,
+{
+	pub(crate) fn add_to_linker( &self, linker: &mut Linker<Ctx>, caller_id: u64, imports: &ImportAsyncness ) -> Result<(), wasmtime::Error> {
+		match self {
+			Self::Sync( binding ) => binding.add_to_linker_async( linker, imports ),
+			Self::Async( binding ) => binding.add_to_linker_async( linker, caller_id, imports ),
+		}
+	}
+}
+
+impl<PluginId, Ctx, Plugins> From<Binding<PluginId, Ctx, Plugins, PluginInstanceSync<Ctx>>> for BindingAnyAsync<PluginId, Ctx>
+where
+	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+	Ctx: PluginContext + 'static,
+	Plugins: Cardinality<PluginId, PluginInstanceSync<Ctx>> + 'static,
+	PluginSockets<PluginId, Plugins, PluginInstanceSync<Ctx>>: Send + Sync,
+	BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>>: From<Binding<PluginId, Ctx, Plugins, PluginInstanceSync<Ctx>>>,
+{
+	fn from( binding: Binding<PluginId, Ctx, Plugins, PluginInstanceSync<Ctx>> ) -> Self {
+		Self::Sync( binding.into() )
+	}
+}
+
+impl<PluginId, Ctx, Plugins> From<Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>> for BindingAnyAsync<PluginId, Ctx>
+where
+	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+	Ctx: PluginContext + 'static,
+	Plugins: Cardinality<PluginId, PluginInstanceAsync<Ctx>> + 'static,
+	PluginSockets<PluginId, Plugins, PluginInstanceAsync<Ctx>>: Send + Sync,
+	BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>>: From<Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>>,
+{
+	fn from( binding: Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>> ) -> Self {
+		Self::Async( binding.into() )
+	}
+}
+
+impl<PluginId, Ctx> From<BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>>> for BindingAnyAsync<PluginId, Ctx>
+where
+	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+	Ctx: PluginContext + 'static,
+{
+	fn from( binding: BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>> ) -> Self { Self::Sync( binding ) }
+}
+
+impl<PluginId, Ctx> From<BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>>> for BindingAnyAsync<PluginId, Ctx>
+where
+	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+	Ctx: PluginContext + 'static,
+{
+	fn from( binding: BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>> ) -> Self { Self::Async( binding ) }
 }
 
 impl<PluginId, Ctx> BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>>
@@ -362,12 +500,12 @@ where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
 	Ctx: PluginContext + 'static,
 {
-	pub(crate) fn add_to_linker_async( &self, linker: &mut Linker<Ctx> ) -> Result<(), wasmtime::Error> {
+	pub(crate) fn add_to_linker_async( &self, linker: &mut Linker<Ctx>, caller_id: u64, imports: &ImportAsyncness ) -> Result<(), wasmtime::Error> {
 		match self {
-			Self::ExactlyOne( binding ) => Binding::add_to_linker_async( binding, linker ),
-			Self::AtMostOne( binding ) => Binding::add_to_linker_async( binding, linker ),
-			Self::AtLeastOne( binding ) => Binding::add_to_linker_async( binding, linker ),
-			Self::Any( binding ) => Binding::add_to_linker_async( binding, linker ),
+			Self::ExactlyOne( binding ) => Binding::add_to_linker_async( binding, linker, caller_id, imports ),
+			Self::AtMostOne( binding ) => Binding::add_to_linker_async( binding, linker, caller_id, imports ),
+			Self::AtLeastOne( binding ) => Binding::add_to_linker_async( binding, linker, caller_id, imports ),
+			Self::Any( binding ) => Binding::add_to_linker_async( binding, linker, caller_id, imports ),
 		}
 	}
 }

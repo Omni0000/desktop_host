@@ -17,7 +17,6 @@ fn async_dispatch_error_invalid_function() -> Result<(), Box<dyn std::error::Err
 		let plugin = plugins.test_plugin.plugin.instantiate_async(
 			&engine,
 			&linker,
-			futures::executor::ThreadPool::new()?,
 		).await?;
 		let binding = Binding::new(
 			bindings.root.package,

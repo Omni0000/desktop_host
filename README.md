@@ -22,6 +22,7 @@
 - Unlimited plugin composition with no architectural restrictions
 - Performant language-agnostic plugin system
 - Component Model async functions
+- Synchronous applications keep a fully synchronous API and runtime path
 
 NOTE: Cross-plugin support for `future`, `stream`, `error-context`, and threads is waiting for Wasmtime's implementations to be ready.
 
@@ -31,6 +32,7 @@ NOTE: Cross-plugin support for `future`, `stream`, `error-context`, and threads 
 - [Contents](#contents)
 - [Project Philosophy](#project-philosophy)
 - [Quick Start](#quick-start)
+- [Async Plugin Graphs](#async-plugin-graphs)
 - [Plugin Error ABI](#plugin-error-abi)
 - [Goals](#goals)
 - [License](#license)
@@ -127,6 +129,30 @@ match result {
 	ExactlyOne( _id, Err( err )) => panic!( "dispatch error: {}", err ),
 }
 ```
+
+## Async Plugin Graphs
+
+Wasmtime chooses synchronous or async-capable execution when a component is
+instantiated, so wasm-link exposes `PluginInstanceSync` and
+`PluginInstanceAsync`. Use `instantiate`, `link`, and `Binding::dispatch` for a
+fully synchronous graph. Use `instantiate_async`, `link_async`, and
+`Binding::dispatch_async` when a plugin may suspend.
+
+`link_async` accepts both synchronous and asynchronous socket bindings. A
+synchronous instance can also be placed in an async binding by converting it
+with `PluginInstanceAsync::from`/`Into`; it remains a synchronous Wasmtime
+instance. `Function` only describes routing and return-value handling—wasm-link
+reads Component Model async effects from the compiled components while linking.
+
+One dispatch future cooperatively drives the whole graph. It does not create
+worker threads and does not require an executor argument. Calls in one dispatch
+may suspend together inside a shared plugin; separate dispatches to that plugin
+are served one at a time.
+
+Dropping a dispatch detaches its session so a later session can drive the store.
+Wasmtime does not yet expose host-side cancellation for an already-admitted
+`call_concurrent` task, so that guest task may remain pending until its external
+operation completes.
 
 ## Plugin Error ABI
 

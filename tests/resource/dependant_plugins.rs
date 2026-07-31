@@ -47,13 +47,11 @@ fn async_resource_test_wrapper() {
 	futures::executor::block_on( async {
 		let engine = Engine::default();
 		let linker = Linker::new( &engine );
-		let executor = futures::executor::ThreadPool::new()
-			.expect( "Failed to create async executor" );
 		let plugins = fixtures::plugins( &engine );
 		let bindings = fixtures::bindings();
 
 		let counter_instance = plugins.counter.plugin
-			.instantiate_async( &engine, &linker, executor.clone() )
+			.instantiate_async( &engine, &linker )
 			.await
 			.expect( "Failed to instantiate counter plugin asynchronously" );
 		let dependency_binding = Binding::new(
@@ -63,7 +61,7 @@ fn async_resource_test_wrapper() {
 		);
 
 		let consumer_instance = plugins.consumer.plugin
-			.link_async( &engine, linker, vec![ dependency_binding ], executor )
+			.link_async( &engine, linker, vec![ dependency_binding ] )
 			.await
 			.expect( "Failed to link consumer plugin asynchronously" );
 		let root_binding = Binding::new(

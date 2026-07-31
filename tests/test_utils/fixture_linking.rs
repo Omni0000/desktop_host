@@ -184,12 +184,7 @@ mod fixture_linking {
 					| wit_parser::FunctionKind::AsyncMethod( _ ) => FunctionKind::Method,
 				};
 				let return_kind = parse_return_kind( &resolve, function.result )?;
-				let metadata = match function.kind {
-					wit_parser::FunctionKind::AsyncFreestanding
-					| wit_parser::FunctionKind::AsyncStatic( _ )
-					| wit_parser::FunctionKind::AsyncMethod( _ ) => Function::new_async( kind, return_kind ),
-					_ => Function::new( kind, return_kind ),
-				};
+				let metadata = Function::new( kind, return_kind );
 				Ok(( function.name.clone(), metadata ))
 			})
 			.collect::<Result<HashMap<_, _>,FixtureError>>()?;

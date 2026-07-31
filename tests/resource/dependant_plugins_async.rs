@@ -13,11 +13,10 @@ fn native_async_resource_calls_route_to_the_owning_plugin() -> Result<(), Box<dy
 	futures::executor::block_on( async {
 		let engine = Engine::default();
 		let linker = Linker::new( &engine );
-		let executor = futures::executor::ThreadPool::new()?;
 		let plugins = fixtures::plugins( &engine );
 		let bindings = fixtures::bindings();
 		let counter = plugins.counter.plugin
-			.instantiate_async( &engine, &linker, executor.clone() ).await?;
+			.instantiate_async( &engine, &linker ).await?;
 		let dependency = Binding::new(
 			bindings.dependency.package,
 			HashMap::from([( bindings.dependency.name, bindings.dependency.spec )]),
@@ -27,7 +26,6 @@ fn native_async_resource_calls_route_to_the_owning_plugin() -> Result<(), Box<dy
 			&engine,
 			linker,
 			vec![ dependency ],
-			executor,
 		).await?;
 		let root = Binding::new(
 			bindings.root.package,

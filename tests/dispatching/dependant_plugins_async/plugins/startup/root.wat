@@ -8,7 +8,6 @@
 			(case "runtime-exception" string)
 			(case "invalid-argument-list")
 			(case "unsupported-type" string)
-			(case "executor-unavailable")
 			(case "resource-table-full")
 			(case "resource-handle-conversion-failed")
 			(case "invalid-resource-handle")

@@ -1,7 +1,7 @@
 use std::sync::Arc ;
 use std::collections::{ HashMap, HashSet };
 use futures::lock::Mutex ;
-use wasmtime::component::{ Linker, ResourceType, Val };
+use wasmtime::{ AsContextMut, component::{ Linker, ResourceType, Val }};
 
 use crate::{ Binding, PluginContext, PluginInstanceAsync, PluginInstanceSync };
 use crate::cardinality::Cardinality ;
@@ -112,6 +112,98 @@ impl Interface {
 	}
 
 	#[inline]
+	pub(crate) fn add_to_linker_async_sync<PluginId, Ctx, Plugins>(
+		&self,
+		linker: &mut Linker<Ctx>,
+		package_name: &str,
+		interface_ident: &str,
+		interface_name: &str,
+		binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceSync<Ctx>>,
+		imports: Option<&HashMap<String, bool>>,
+	) -> Result<(), wasmtime::Error>
+	where
+		PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
+		Ctx: PluginContext,
+		Plugins: Cardinality<PluginId, PluginInstanceSync<Ctx>> + 'static,
+		<Plugins as Cardinality<PluginId, PluginInstanceSync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceSync<Ctx>>>>: Send + Sync,
+		<Plugins as Cardinality<PluginId, PluginInstanceSync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceSync<Ctx>>>>: Cardinality<PluginId, Arc<Mutex<PluginInstanceSync<Ctx>>>>,
+		<<Plugins as Cardinality<PluginId, PluginInstanceSync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceSync<Ctx>>>> as Cardinality<PluginId, Arc<Mutex<PluginInstanceSync<Ctx>>>>>::Rebind<Val>: Into<Val> + Send,
+	{
+		let mut linker_root = linker.root();
+		let mut linker_instance = linker_root.instance( interface_ident )?;
+
+		self.functions.iter().try_for_each(|( name, metadata )| {
+			let destination_is_async = Binding::sync_export_is_async(
+				binding,
+				package_name,
+				interface_name,
+				name,
+			)?;
+			if destination_is_async {
+				return Err( wasmtime::Error::msg( "synchronously instantiated plugin exposes an async function" ));
+			}
+			let import_is_async = imports.and_then(| functions | functions.get( name )).copied().unwrap_or( false );
+			let package_name = package_name.to_string();
+			let interface_name = interface_name.to_string();
+			let binding = binding.clone();
+			let function_name = name.clone();
+			let function = metadata.clone();
+
+			macro_rules! link_blocking {( $dispatch: expr ) => {
+				linker_instance.func_new_async( name, move | ctx, _ty, args, results | {
+					let value = $dispatch(
+						&binding,
+						ctx,
+						&package_name,
+						&interface_name,
+						&function_name,
+						&function,
+						args,
+					);
+					Box::new( async move {
+						results[0] = value;
+						Ok(())
+					})
+				})
+			}}
+			macro_rules! link_concurrent {( $dispatch: expr ) => {
+				linker_instance.func_new_concurrent( name, move | ctx, _ty, args, results | {
+					let package_name = package_name.clone();
+					let interface_name = interface_name.clone();
+					let binding = binding.clone();
+					let function_name = function_name.clone();
+					let function = function.clone();
+					Box::pin( async move {
+						results[0] = ctx.with(| mut access | $dispatch(
+							&binding,
+							access.as_context_mut(),
+							&package_name,
+							&interface_name,
+							&function_name,
+							&function,
+							args,
+						));
+						Ok(())
+					})
+				})
+			}}
+
+			match ( import_is_async, metadata.kind() ) {
+				( true, FunctionKind::Freestanding ) => link_concurrent!( dispatch_all ),
+				( true, FunctionKind::Method ) => link_concurrent!( dispatch_method ),
+				( false, FunctionKind::Freestanding ) => link_blocking!( dispatch_all ),
+				( false, FunctionKind::Method ) => link_blocking!( dispatch_method ),
+			}
+		})?;
+
+		self.resources.iter().try_for_each(| resource | linker_instance
+			.resource( resource.as_str(), ResourceType::host::<Arc<ResourceWrapper<PluginId>>>(), ResourceWrapper::<PluginId>::drop )
+		)?;
+
+		Ok(())
+	}
+
+	#[inline]
 	pub(crate) fn add_to_linker_async<PluginId, Ctx, Plugins>(
 		&self,
 		linker: &mut Linker<Ctx>,
@@ -119,6 +211,8 @@ impl Interface {
 		interface_ident: &str,
 		interface_name: &str,
 		binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
+		caller_id: u64,
+		imports: Option<&HashMap<String, bool>>,
 	) -> Result<(), wasmtime::Error>
 	where
 		PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
@@ -132,6 +226,18 @@ impl Interface {
 		let mut linker_instance = linker_root.instance( interface_ident )?;
 
 		self.functions.iter().try_for_each(|( name, metadata )| {
+			let destination_is_async = Binding::export_is_async(
+				binding,
+				package_name,
+				interface_name,
+				name,
+			)?;
+			let import_is_async = imports.and_then(| functions | functions.get( name )).copied().unwrap_or( false );
+			if destination_is_async && !import_is_async {
+				return Err( wasmtime::Error::msg( format!(
+					"synchronous import `{interface_ident}.{name}` cannot call an async plugin export"
+				)));
+			}
 			let package_name = package_name.to_string();
 			let interface_name = interface_name.to_string();
 			let binding = binding.clone();
@@ -147,7 +253,7 @@ impl Interface {
 					let function = function.clone();
 					Box::pin( async move {
 						results[0] = $dispatch(
-							&binding, ctx, &package_name, &interface_name, &function_name, &function, args,
+							&binding, caller_id, ctx, &package_name, &interface_name, &function_name, &function, args,
 						).await;
 						Ok(())
 					})
@@ -163,14 +269,14 @@ impl Interface {
 					let function = function.clone();
 					Box::new( async move {
 						results[0] = $dispatch(
-							&binding, ctx, &package_name, &interface_name, &function_name, &function, args,
+							&binding, caller_id, ctx, &package_name, &interface_name, &function_name, &function, args,
 						).await;
 						Ok(())
 					})
 				})
 			}}
 
-			match ( metadata.is_async(), metadata.kind() ) {
+			match ( import_is_async, metadata.kind() ) {
 				( true, FunctionKind::Freestanding ) => link_concurrent!( dispatch_all_async ),
 				( true, FunctionKind::Method ) => link_concurrent!( dispatch_method_async ),
 				( false, FunctionKind::Freestanding ) => link_blocking!( dispatch_all_async_blocking ),
@@ -201,15 +307,15 @@ pub enum FunctionKind {
 
 /// Metadata about a function declared by an interface.
 ///
-/// Provides information needed during linking to wire up cross-plugin dispatch.
+/// Provides routing and return-value information for cross-plugin dispatch.
+/// Asyncness is read from the source import and destination exports at link time;
+/// it is not part of binding metadata.
 #[derive( Debug, Clone )]
 pub struct Function {
 	/// Whether this function is freestanding or a resource method.
 	kind: FunctionKind,
 	/// The function's return kind for dispatch handling
 	return_kind: ReturnKind,
-	/// Whether the WIT function is declared with the `async` effect.
-	is_async: bool,
 }
 
 impl Function {
@@ -218,25 +324,7 @@ impl Function {
 		kind: FunctionKind,
 		return_kind: ReturnKind,
 	) -> Self {
-		Self { kind, return_kind, is_async: false }
-	}
-
-	/// Creates metadata for a WIT function declared with the `async` effect.
-	///
-	/// ```
-	/// use wasm_link::{ Function, FunctionKind, ReturnKind };
-	///
-	/// let function = Function::new_async(
-	/// 	FunctionKind::Freestanding,
-	/// 	ReturnKind::MayContainResources,
-	/// );
-	/// assert!( function.is_async() );
-	/// ```
-	pub fn new_async(
-		kind: FunctionKind,
-		return_kind: ReturnKind,
-	) -> Self {
-		Self { kind, return_kind, is_async: true }
+		Self { kind, return_kind }
 	}
 
 	/// The function's return kind for dispatch handling.
@@ -244,15 +332,6 @@ impl Function {
 
 	/// Whether this function is freestanding or a resource method.
 	pub fn kind( &self ) -> FunctionKind { self.kind }
-
-	/// Whether the WIT function is declared with the `async` effect.
-	///
-	/// ```
-	/// # use wasm_link::{ Function, FunctionKind, ReturnKind };
-	/// let function = Function::new( FunctionKind::Freestanding, ReturnKind::Void );
-	/// assert!( !function.is_async() );
-	/// ```
-	pub fn is_async( &self ) -> bool { self.is_async }
 
 }
 

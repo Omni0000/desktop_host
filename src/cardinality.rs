@@ -53,6 +53,12 @@ pub trait Cardinality<Id, T>: Sized {
 	fn get( &self, id: &Id ) -> Option<&T>
 	where
 		Id: Hash + Eq ;
+
+	/// Returns whether any value satisfies a fallible predicate.
+	///
+	/// # Errors
+	/// Returns the first error produced by `predicate`.
+	fn try_any<E>( &self, predicate: impl FnMut( &Id, &T ) -> Result<bool, E> ) -> Result<bool, E>;
 }
 
 /// Exactly one value with ID, guaranteed present.
@@ -124,6 +130,10 @@ impl<Id, T> Cardinality<Id, T> for ExactlyOne<Id, T> {
 		debug_assert!( &self.0 == id, "singleton cardinality id mismatch" );
 		Some( &self.1 )
 	}
+
+	fn try_any<E>( &self, mut predicate: impl FnMut( &Id, &T ) -> Result<bool, E> ) -> Result<bool, E> {
+		predicate( &self.0, &self.1 )
+	}
 }
 
 impl<Id, T> Cardinality<Id, T> for AtMostOne<Id, T> {
@@ -176,6 +186,13 @@ impl<Id, T> Cardinality<Id, T> for AtMostOne<Id, T> {
 				debug_assert!( stored_id == id, "singleton cardinality id mismatch" );
 				Some( value )
 			}
+		}
+	}
+
+	fn try_any<E>( &self, mut predicate: impl FnMut( &Id, &T ) -> Result<bool, E> ) -> Result<bool, E> {
+		match &self.0 {
+			Some(( id, value )) => predicate( id, value ),
+			None => Ok( false ),
 		}
 	}
 }
@@ -231,6 +248,12 @@ impl<Id: Hash + Eq, T> Cardinality<Id, T> for AtLeastOne<Id, T> {
 	{
 		self.0.get( id )
 	}
+
+	fn try_any<E>( &self, mut predicate: impl FnMut( &Id, &T ) -> Result<bool, E> ) -> Result<bool, E> {
+		self.0.nonempty_iter().into_iter().try_fold( false, | found, ( id, value )| {
+			if found { Ok( true ) } else { predicate( id, value ) }
+		})
+	}
 }
 
 impl<Id: Hash + Eq, T> Cardinality<Id, T> for Any<Id, T> {
@@ -269,6 +292,12 @@ impl<Id: Hash + Eq, T> Cardinality<Id, T> for Any<Id, T> {
 		Id: Hash + Eq,
 	{
 		self.0.get( id )
+	}
+
+	fn try_any<E>( &self, mut predicate: impl FnMut( &Id, &T ) -> Result<bool, E> ) -> Result<bool, E> {
+		self.0.iter().try_fold( false, | found, ( id, value )| {
+			if found { Ok( true ) } else { predicate( id, value ) }
+		})
 	}
 }
 
