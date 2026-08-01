@@ -297,7 +297,7 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 			response: Some( response ),
 		};
 		dispatch.scheduler.schedule( dispatch.caller, dispatch.path, self.clone(), request );
-		result.await.map_err(| _ | runtime_error( AsyncRuntimeError::MissingResponse ))?
+		receive_response( result ).await
 	}
 
 	pub(crate) fn admit( &self, scheduler: &AsyncScheduler<Ctx>, request: AsyncRequest ) {
@@ -718,6 +718,15 @@ impl Drop for ResponseGuard {
 
 fn runtime_error( error: AsyncRuntimeError ) -> DispatchError {
 	DispatchError::RuntimeException( error.into() )
+}
+
+async fn receive_response(
+	response: oneshot::Receiver<Result<Val, DispatchError>>,
+) -> Result<Val, DispatchError> {
+	match response.await {
+		Ok( result ) => result,
+		Err( _ ) => Err( runtime_error( AsyncRuntimeError::MissingResponse )),
+	}
 }
 
 fn resolve_export(

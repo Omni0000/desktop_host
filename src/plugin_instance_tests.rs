@@ -7,6 +7,7 @@ use wasmtime::component::{ Component, FutureReader, Linker, ResourceTable, Strea
 use super::{
 	AsyncInstanceRuntime, AsyncRequest, AsyncRuntimeError, AttachedDriver, DriverMessage,
 	DriverState, NativeAsyncInstance, PluginInstanceAsync, PluginState, ensure_supported_value,
+	receive_response,
 };
 use crate::async_scheduler::{ AsyncScheduler, DispatchContext, PluginGraph, SchedulerSlot };
 use crate::{ DispatchError, Function, FunctionKind, PluginContext, ReturnKind };
@@ -23,6 +24,16 @@ fn dropping_a_request_reports_the_exact_cancellation_error() -> Result<(), Box<d
 	drop( request );
 	assert_runtime_error( futures::executor::block_on( result )?, &AsyncRuntimeError::CallCancelled )?;
 	Ok(())
+}
+
+#[test]
+fn dropped_response_sender_reports_the_exact_missing_response_error() -> Result<(), Box<dyn std::error::Error>> {
+	let ( response, result ) = futures::channel::oneshot::channel();
+	drop( response );
+	assert_runtime_error(
+		futures::executor::block_on( receive_response( result )),
+		&AsyncRuntimeError::MissingResponse,
+	)
 }
 
 #[test]
@@ -124,6 +135,49 @@ fn concurrent_driver_finishes_an_admitted_call_before_shutdown() -> Result<(), B
 		drop( sender );
 		assert_eq!( state.run_requests( receiver ).await, AsyncRuntimeError::DriverStopped );
 		assert!( matches!( result.await, Ok( Ok( Val::U32( 42 )))));
+		Ok(())
+	})
+}
+
+#[test]
+fn concurrent_driver_reports_exact_invalid_export_errors() -> Result<(), Box<dyn std::error::Error>> {
+	futures::executor::block_on( async {
+		let mut config = Config::new();
+		config.concurrency_support( true );
+		let engine = Engine::new( &config )?;
+		let component = Component::from_file(
+			&engine,
+			concat!( env!( "CARGO_MANIFEST_DIR" ), "/tests/dispatch_error/invalid_function/plugins/test-plugin/root.wat" ),
+		)?;
+		let linker = Linker::<Context>::new( &engine );
+		let mut store = Store::new( &engine, Context { table: ResourceTable::new() });
+		let instance = linker.instantiate_async( &mut store, &component ).await?;
+		let mut state = PluginState {
+			store,
+			instance,
+			interface_remaps: std::collections::HashMap::new(),
+			fuel_limiter: None,
+			epoch_limiter: None,
+		};
+		let ( sender, receiver ) = futures::channel::mpsc::unbounded();
+		let ( mut missing_interface, missing_interface_result ) = request( "test" );
+		missing_interface.package_name = "test:dispatch-error".to_string();
+		missing_interface.interface_name = "missing".to_string();
+		let ( mut non_function, non_function_result ) = request( "not-a-function" );
+		non_function.package_name = "test:dispatch-error".to_string();
+		sender.unbounded_send( DriverMessage::Call( missing_interface ))?;
+		sender.unbounded_send( DriverMessage::Call( non_function ))?;
+		drop( sender );
+
+		assert_eq!( state.run_requests( receiver ).await, AsyncRuntimeError::DriverStopped );
+		assert!( matches!(
+			missing_interface_result.await?,
+			Err( DispatchError::InvalidInterfacePath( path )) if path == "test:dispatch-error/missing"
+		));
+		assert!( matches!(
+			non_function_result.await?,
+			Err( DispatchError::InvalidFunction( function )) if function == "test:dispatch-error/root:not-a-function"
+		));
 		Ok(())
 	})
 }
