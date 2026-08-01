@@ -6,15 +6,22 @@ use wasmtime::component::{ Accessor, Val };
 use crate::{ Binding, Function, FunctionKind, ReturnKind, PluginContext, DispatchError };
 use crate::cardinality::Cardinality ;
 use crate::plugin_instance::{ PluginInstanceAsync, PluginInstanceSync };
+use crate::async_scheduler::{ DispatchContext, AsyncScheduler, ExecutionPathId, PluginKey };
 use super::resource_wrapper::ResourceWrapper ;
 
 
 
-struct DispatchTarget<'a> {
+pub(crate) struct DispatchTarget<'a> {
 	package_name: &'a str,
 	interface_name: &'a str,
 	function_name: &'a str,
 	function: &'a Function,
+}
+
+impl<'a> DispatchTarget<'a> {
+	pub(crate) fn new( package_name: &'a str, interface_name: &'a str, function_name: &'a str, function: &'a Function ) -> Self {
+		Self { package_name, interface_name, function_name, function }
+	}
 }
 
 /// Dispatches a non-method function call to all plugins
@@ -159,11 +166,11 @@ where
 /// Asynchronously dispatches a non-method function call to all plugins.
 pub(crate) async fn dispatch_all_async<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: &Accessor<Ctx>,
-	package_name: &str,
-	interface_name: &str,
-	function_name: &str,
-	function: &Function,
+	target: &DispatchTarget<'_>,
 	data: &[Val],
 ) -> Val
 where
@@ -174,15 +181,9 @@ where
 	<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>>: Cardinality<PluginId, Arc<Mutex<PluginInstanceAsync<Ctx>>>>,
 	<<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>> as Cardinality<PluginId, Arc<Mutex<PluginInstanceAsync<Ctx>>>>>::Rebind<Val>: Into<Val> + Send,
 {
-	debug_assert_eq!( function.kind(), FunctionKind::Freestanding );
-	let target = DispatchTarget {
-		package_name,
-		interface_name,
-		function_name,
-		function,
-	};
+	debug_assert_eq!( target.function.kind(), FunctionKind::Freestanding );
 	binding.plugins().map_async(| plugin_id, plugin | async {
-		Val::Result( match dispatch_of_async( ctx, plugin_id, plugin, &target, data ).await {
+		Val::Result( match dispatch_of_async( DispatchContext::new( scheduler, caller, path ), ctx, plugin_id, plugin, target, data ).await {
 			Ok( val ) => Ok( Some( Box::new( val ))),
 			Err( err ) => Err( Some( Box::new( err.into() ))),
 		})
@@ -192,11 +193,11 @@ where
 /// Asynchronously dispatches a method call to the plugin owning its resource.
 pub(crate) async fn dispatch_method_async<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: &Accessor<Ctx>,
-	package_name: &str,
-	interface_name: &str,
-	function_name: &str,
-	function: &Function,
+	target: &DispatchTarget<'_>,
 	data: &[Val],
 ) -> Val
 where
@@ -206,14 +207,14 @@ where
 	<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>>: Send + Sync,
 	<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>>: Cardinality<PluginId, Arc<Mutex<PluginInstanceAsync<Ctx>>>>,
 {
-	debug_assert_eq!( function.kind(), FunctionKind::Method );
+	debug_assert_eq!( target.function.kind(), FunctionKind::Method );
 	Val::Result( match route_method_async(
 		binding,
+		scheduler,
+		caller,
+		path,
 		ctx,
-		package_name,
-		interface_name,
-		function_name,
-		function,
+		target,
 		data,
 	).await {
 		Ok( val ) => Ok( Some( Box::new( val ))),
@@ -222,13 +223,13 @@ where
 }
 
 /// Asynchronously implements a synchronous WIT import without blocking its host thread.
-pub(crate) async fn dispatch_all_async_blocking<PluginId, Ctx, Plugins>(
+pub(crate) async fn dispatch_all_async_sync<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: StoreContextMut<'_, Ctx>,
-	package_name: &str,
-	interface_name: &str,
-	function_name: &str,
-	function: &Function,
+	target: &DispatchTarget<'_>,
 	data: &[Val],
 ) -> Val
 where
@@ -239,16 +240,10 @@ where
 	<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>>: Cardinality<PluginId, Arc<Mutex<PluginInstanceAsync<Ctx>>>>,
 	<<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>> as Cardinality<PluginId, Arc<Mutex<PluginInstanceAsync<Ctx>>>>>::Rebind<Val>: Into<Val> + Send,
 {
-	debug_assert_eq!( function.kind(), FunctionKind::Freestanding );
+	debug_assert_eq!( target.function.kind(), FunctionKind::Freestanding );
 	let ctx = Mutex::new( ctx );
-	let target = DispatchTarget {
-		package_name,
-		interface_name,
-		function_name,
-		function,
-	};
 	binding.plugins().map_async(| plugin_id, plugin | async {
-		Val::Result( match dispatch_of_async_blocking( &ctx, plugin_id, plugin, &target, data ).await {
+		Val::Result( match dispatch_of_async_sync( DispatchContext::new( scheduler, caller, path ), &ctx, plugin_id, plugin, target, data ).await {
 			Ok( val ) => Ok( Some( Box::new( val ))),
 			Err( err ) => Err( Some( Box::new( err.into() ))),
 		})
@@ -256,13 +251,13 @@ where
 }
 
 /// Asynchronously implements a synchronous WIT method import.
-pub(crate) async fn dispatch_method_async_blocking<PluginId, Ctx, Plugins>(
+pub(crate) async fn dispatch_method_async_sync<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: StoreContextMut<'_, Ctx>,
-	package_name: &str,
-	interface_name: &str,
-	function_name: &str,
-	function: &Function,
+	target: &DispatchTarget<'_>,
 	data: &[Val],
 ) -> Val
 where
@@ -272,15 +267,15 @@ where
 	<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>>: Send + Sync,
 	<Plugins as Cardinality<PluginId, PluginInstanceAsync<Ctx>>>::Rebind<Arc<Mutex<PluginInstanceAsync<Ctx>>>>: Cardinality<PluginId, Arc<Mutex<PluginInstanceAsync<Ctx>>>>,
 {
-	debug_assert_eq!( function.kind(), FunctionKind::Method );
+	debug_assert_eq!( target.function.kind(), FunctionKind::Method );
 	let ctx = Mutex::new( ctx );
-	Val::Result( match route_method_async_blocking(
+	Val::Result( match route_method_async_sync(
 		binding,
+		scheduler,
+		caller,
+		path,
 		&ctx,
-		package_name,
-		interface_name,
-		function_name,
-		function,
+		target,
 		data,
 	).await {
 		Ok( val ) => Ok( Some( Box::new( val ))),
@@ -289,6 +284,7 @@ where
 }
 
 async fn dispatch_of_async<PluginId, Ctx>(
+	dispatch: DispatchContext<'_, Ctx>,
 	ctx: &Accessor<Ctx>,
 	plugin_id: PluginId,
 	plugin: Arc<Mutex<PluginInstanceAsync<Ctx>>>,
@@ -299,8 +295,9 @@ where
 	PluginId: Clone + std::hash::Hash + Eq + Send + Sync + 'static,
 	Ctx: PluginContext,
 {
-	let lock = plugin.lock().await;
-	let result = lock.dispatch_async(
+	let instance = plugin.lock().await.handle();
+	let result = instance.dispatch_async(
+		&dispatch,
 		target.package_name,
 		target.interface_name,
 		target.function_name,
@@ -317,7 +314,8 @@ where
 	}
 }
 
-async fn dispatch_of_async_blocking<PluginId, Ctx>(
+async fn dispatch_of_async_sync<PluginId, Ctx>(
+	dispatch: DispatchContext<'_, Ctx>,
 	ctx: &Mutex<StoreContextMut<'_, Ctx>>,
 	plugin_id: PluginId,
 	plugin: Arc<Mutex<PluginInstanceAsync<Ctx>>>,
@@ -328,8 +326,9 @@ where
 	PluginId: Clone + std::hash::Hash + Eq + Send + Sync + 'static,
 	Ctx: PluginContext,
 {
-	let lock = plugin.lock().await;
-	let result = lock.dispatch_async(
+	let instance = plugin.lock().await.handle();
+	let result = instance.dispatch_async(
+		&dispatch,
 		target.package_name,
 		target.interface_name,
 		target.function_name,
@@ -348,11 +347,11 @@ where
 
 async fn route_method_async<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: &Accessor<Ctx>,
-	package_name: &str,
-	interface_name: &str,
-	function_name: &str,
-	function: &Function,
+	target: &DispatchTarget<'_>,
 	data: &[Val],
 ) -> Result<Val, DispatchError>
 where
@@ -377,23 +376,16 @@ where
 
 	let mut data = Vec::from( data );
 	data[0] = Val::Resource( resource_handle );
-	let target = DispatchTarget {
-		package_name,
-		interface_name,
-		function_name,
-		function,
-	};
-
-	dispatch_of_async( ctx, plugin_id, plugin, &target, &data ).await
+	dispatch_of_async( DispatchContext::new( scheduler, caller, path ), ctx, plugin_id, plugin, target, &data ).await
 }
 
-async fn route_method_async_blocking<PluginId, Ctx, Plugins>(
+async fn route_method_async_sync<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: &Mutex<StoreContextMut<'_, Ctx>>,
-	package_name: &str,
-	interface_name: &str,
-	function_name: &str,
-	function: &Function,
+	target: &DispatchTarget<'_>,
 	data: &[Val],
 ) -> Result<Val, DispatchError>
 where
@@ -417,14 +409,7 @@ where
 		.clone();
 	let mut data = Vec::from( data );
 	data[0] = Val::Resource( resource_handle );
-	let target = DispatchTarget {
-		package_name,
-		interface_name,
-		function_name,
-		function,
-	};
-
-	dispatch_of_async_blocking( ctx, plugin_id, plugin, &target, &data ).await
+	dispatch_of_async_sync( DispatchContext::new( scheduler, caller, path ), ctx, plugin_id, plugin, target, &data ).await
 }
 
 fn wrap_resources<T, Id>( val: Val, plugin_id: Id, store: &mut StoreContextMut<T> ) -> Result<Val, DispatchError>

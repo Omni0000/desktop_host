@@ -50,10 +50,9 @@ fn async_method_metadata_rejects_calls_without_resource_argument() -> Result<(),
 	futures::executor::block_on( async {
 		let engine = Engine::default();
 		let linker = Linker::new( &engine );
-		let executor = futures::executor::ThreadPool::new()?;
 		let plugins = fixtures::plugins( &engine );
 		let bindings = fixtures::bindings();
-		let child = plugins.child.plugin.instantiate_async( &engine, &linker, executor.clone() ).await?;
+		let child = plugins.child.plugin.instantiate_async( &engine, &linker ).await?;
 		let dependency = Binding::new(
 			bindings.dependency.package,
 			HashMap::from([(
@@ -72,7 +71,6 @@ fn async_method_metadata_rejects_calls_without_resource_argument() -> Result<(),
 			&engine,
 			linker,
 			vec![ dependency ],
-			executor,
 		).await?;
 		let root = Binding::new(
 			bindings.root.package,
@@ -80,7 +78,7 @@ fn async_method_metadata_rejects_calls_without_resource_argument() -> Result<(),
 			ExactlyOne( "startup".to_string(), startup ),
 		);
 
-		let result = root.dispatch_async( "root", "get-value", &[] ).await?;
+		let result = root.dispatch( "root", "get-value", &[] ).await?;
 		assert!( matches!(
 			&result,
 			ExactlyOne( _, Ok( Val::Result( Err( Some( error ))))) if

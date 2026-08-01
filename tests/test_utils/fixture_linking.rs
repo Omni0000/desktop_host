@@ -184,12 +184,7 @@ mod fixture_linking {
 					| wit_parser::FunctionKind::AsyncMethod( _ ) => FunctionKind::Method,
 				};
 				let return_kind = parse_return_kind( &resolve, function.result )?;
-				let metadata = match function.kind {
-					wit_parser::FunctionKind::AsyncFreestanding
-					| wit_parser::FunctionKind::AsyncStatic( _ )
-					| wit_parser::FunctionKind::AsyncMethod( _ ) => Function::new_async( kind, return_kind ),
-					_ => Function::new( kind, return_kind ),
-				};
+				let metadata = Function::new( kind, return_kind );
 				Ok(( function.name.clone(), metadata ))
 			})
 			.collect::<Result<HashMap<_, _>,FixtureError>>()?;
@@ -220,7 +215,7 @@ mod fixture_linking {
 	fn has_resource( resolve: &wit_parser::Resolve, wit_type: wit_parser::Type ) -> Result<bool, FixtureError> {
 		Ok( match wit_type {
 			wit_parser::Type::Id( id ) => match &resolve.types.get( id )
-				.ok_or_else(|| FixtureError::UndeclaredType( id ))?
+				.ok_or( FixtureError::UndeclaredType( id ))?
 				.kind
 			{
 				wit_parser::TypeDefKind::Resource

@@ -15,7 +15,7 @@
 		(export "dispatch-error" (type (eq $dispatch-error')))
 		(type $dispatch-result (result u32 (error 1)))
 		(type $wrapped-result (tuple string $dispatch-result))
-		(type $get-value (func (result $wrapped-result)))
+		(type $get-value (func async (result $wrapped-result)))
 		(export "get-value" (func (type $get-value)))
 	))
 	(import "test:child/root" (instance $child (type $child-interface)))
@@ -56,7 +56,7 @@
 		(with "child" (instance $child-imports))
 	))
 	(alias core export $adapter "get-value" (core func $adapted-get-value))
-	(func $lifted-get-value (result $wrapped-result) (canon lift
+	(func $lifted-get-value async (result $wrapped-result) (canon lift
 		(core func $adapted-get-value)
 		(memory $shared-memory)
 		(realloc $realloc)

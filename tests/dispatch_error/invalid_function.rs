@@ -17,7 +17,6 @@ fn async_dispatch_error_invalid_function() -> Result<(), Box<dyn std::error::Err
 		let plugin = plugins.test_plugin.plugin.instantiate_async(
 			&engine,
 			&linker,
-			futures::executor::ThreadPool::new()?,
 		).await?;
 		let binding = Binding::new(
 			bindings.root.package,
@@ -26,7 +25,7 @@ fn async_dispatch_error_invalid_function() -> Result<(), Box<dyn std::error::Err
 		);
 
 		assert!( matches!(
-			binding.dispatch_async( "root", "nonexistent-function", &[] ).await,
+			binding.dispatch( "root", "nonexistent-function", &[] ).await,
 			Err( DispatchError::InvalidFunction( _ ))
 		));
 		Ok(())

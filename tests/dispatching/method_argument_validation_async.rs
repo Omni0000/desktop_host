@@ -13,11 +13,10 @@ fn native_async_method_metadata_rejects_calls_without_resource_argument() -> Res
 	futures::executor::block_on( async {
 		let engine = Engine::default();
 		let linker = Linker::new( &engine );
-		let executor = futures::executor::ThreadPool::new()?;
 		let plugins = fixtures::plugins( &engine );
 		let bindings = fixtures::bindings();
 		let child = plugins.child.plugin
-			.instantiate_async( &engine, &linker, executor.clone() ).await?;
+			.instantiate_async( &engine, &linker ).await?;
 		let dependency = Binding::new(
 			bindings.dependency.package,
 			HashMap::from([(
@@ -25,7 +24,7 @@ fn native_async_method_metadata_rejects_calls_without_resource_argument() -> Res
 				Interface::new(
 					HashMap::from([(
 						"get-value".to_string(),
-						Function::new_async( FunctionKind::Method, ReturnKind::AssumeNoResources ),
+						Function::new( FunctionKind::Method, ReturnKind::AssumeNoResources ),
 					)]),
 					HashSet::new(),
 				),
@@ -36,7 +35,6 @@ fn native_async_method_metadata_rejects_calls_without_resource_argument() -> Res
 			&engine,
 			linker,
 			vec![ dependency ],
-			executor,
 		).await?;
 		let root = Binding::new(
 			bindings.root.package,
@@ -44,7 +42,7 @@ fn native_async_method_metadata_rejects_calls_without_resource_argument() -> Res
 			ExactlyOne( "startup".to_string(), startup ),
 		);
 
-		let result = root.dispatch_async( "root", "get-primitive", &[] ).await?;
+		let result = root.dispatch( "root", "get-primitive", &[] ).await?;
 		assert!( matches!(
 			result,
 			ExactlyOne( _, Ok( Val::Result( Err( None ))))
