@@ -1,4 +1,4 @@
-use std::collections::{ HashMap, VecDeque };
+use std::collections::HashMap;
 use std::future::Future ;
 use std::sync::{ Arc, Mutex as StdMutex };
 use futures::channel::{ mpsc, oneshot };
@@ -10,6 +10,7 @@ use wasmtime::component::{ Accessor, Func, Instance, Val };
 use wasmtime::{ AsContextMut, Store };
 
 use crate::{ Function, PluginContext, Remap, ReturnKind };
+use crate::async_scheduler::{ AsyncScheduler, DispatchContext, PluginGraph, SchedulerSlot, SchedulerSlotGuard };
 use crate::resource_wrapper::{ ResourceCreationError, ResourceReceiveError };
 
 type CallLimiter<Ctx> = Box<dyn FnMut( &mut Store<Ctx>, &str, &str, &Function ) -> u64 + Send>;
@@ -21,8 +22,8 @@ type CallLimiter<Ctx> = Box<dyn FnMut( &mut Store<Ctx>, &str, &str, &Function ) 
 /// or [`Plugin::link`]( crate::Plugin::link ).
 pub struct PluginInstanceSync<Ctx: 'static> {
 	state: PluginState<Ctx>,
-	export_asyncness: ExportAsyncness,
-	session_locks: Arc<Vec<crate::dispatch_session::SessionLock>>,
+	export_effects: ExportEffects,
+	graph: PluginGraph,
 }
 
 /// An asynchronously instantiated plugin, ready for asynchronous dispatch.
@@ -31,50 +32,59 @@ pub struct PluginInstanceSync<Ctx: 'static> {
 /// or [`Plugin::link_async`]( crate::Plugin::link_async ). Its Wasmtime [`Store`]
 /// is driven cooperatively by the future returned from asynchronous dispatch.
 pub struct PluginInstanceAsync<Ctx: 'static> {
-	kind: PluginInstanceAsyncKind<Ctx>,
+	instance: AsyncInstance<Ctx>,
 }
 
 impl<Ctx> Clone for PluginInstanceAsync<Ctx> {
-	fn clone( &self ) -> Self { Self { kind: self.kind.clone() } }
+	fn clone( &self ) -> Self { Self { instance: self.instance.clone() } }
 }
 
-enum PluginInstanceAsyncKind<Ctx: 'static> {
-	Async( Arc<PluginInstanceAsyncInner> ),
-	Sync {
-		state: Arc<Mutex<PluginState<Ctx>>>,
-		interface_remaps: Arc<HashMap<String, Remap>>,
-		export_asyncness: Arc<ExportAsyncness>,
-		session_locks: Arc<Vec<crate::dispatch_session::SessionLock>>,
-	},
+enum AsyncInstance<Ctx: 'static> {
+	Native( Arc<NativeAsyncInstance<Ctx>> ),
+	AdaptedSync( Arc<AdaptedSyncInstance<Ctx>> ),
 }
 
-impl<Ctx> Clone for PluginInstanceAsyncKind<Ctx> {
+struct AdaptedSyncInstance<Ctx: 'static> {
+	state: Mutex<PluginState<Ctx>>,
+	interface_remaps: HashMap<String, Remap>,
+	export_effects: ExportEffects,
+	graph: PluginGraph,
+}
+
+impl<Ctx> Clone for AsyncInstance<Ctx> {
 	fn clone( &self ) -> Self {
 		match self {
-			Self::Async( inner ) => Self::Async( Arc::clone( inner )),
-			Self::Sync { state, interface_remaps, export_asyncness, session_locks } => Self::Sync {
-				state: Arc::clone( state ),
-				interface_remaps: Arc::clone( interface_remaps ),
-				export_asyncness: Arc::clone( export_asyncness ),
-				session_locks: Arc::clone( session_locks ),
-			},
+			Self::Native( inner ) => Self::Native( Arc::clone( inner )),
+			Self::AdaptedSync( inner ) => Self::AdaptedSync( Arc::clone( inner )),
 		}
 	}
 }
 
-struct PluginInstanceAsyncInner {
-	sender: mpsc::UnboundedSender<AsyncRequest>,
+struct NativeAsyncInstance<Ctx: 'static> {
+	sender: mpsc::UnboundedSender<DriverMessage>,
 	driver: StdMutex<DriverState>,
 	interface_remaps: HashMap<String, Remap>,
-	export_asyncness: ExportAsyncness,
-	session_locks: Arc<Vec<crate::dispatch_session::SessionLock>>,
+	export_effects: ExportEffects,
+	graph: PluginGraph,
+	scheduler_slot: Arc<SchedulerSlot<Ctx>>,
 }
 
-pub(crate) type ExportAsyncness = HashMap<String, HashMap<String, bool>>;
+pub(crate) struct AsyncInstanceRuntime<Ctx: 'static> {
+	graph: PluginGraph,
+	scheduler_slot: Arc<SchedulerSlot<Ctx>>,
+}
+
+impl<Ctx: 'static> AsyncInstanceRuntime<Ctx> {
+	pub(crate) fn new( graph: PluginGraph, scheduler_slot: Arc<SchedulerSlot<Ctx>> ) -> Self {
+		Self { graph, scheduler_slot }
+	}
+}
+
+pub(crate) type ExportEffects = HashMap<String, HashMap<String, bool>>;
 type DriverFuture = BoxFuture<'static, AsyncRuntimeError>;
 
 pub(crate) trait InstanceMetadata {
-	fn session_locks( &self ) -> &[crate::dispatch_session::SessionLock];
+	fn graph( &self ) -> &PluginGraph;
 	fn export_is_async( &self, package_name: &str, interface_name: &str, function_name: &str ) -> bool;
 }
 
@@ -84,14 +94,38 @@ enum DriverState {
 	Failed( AsyncRuntimeError ),
 }
 
-struct AsyncRequest {
-	caller: u64,
+pub(crate) struct AsyncRequest {
 	package_name: String,
 	interface_name: String,
 	function_name: String,
 	function: Function,
 	data: Vec<Val>,
-	response: oneshot::Sender<Result<Val, DispatchError>>,
+	response: Option<oneshot::Sender<Result<Val, DispatchError>>>,
+}
+
+enum DriverMessage {
+	Call( AsyncRequest ),
+	Reset,
+}
+
+impl AsyncRequest {
+	fn respond( mut self, result: Result<Val, DispatchError> ) {
+		if let Some( response ) = self.response.take() { let _ = response.send( result ); }
+	}
+
+	pub(crate) fn cancel( mut self ) {
+		if let Some( response ) = self.response.take() {
+			let _ = response.send( Err( runtime_error( AsyncRuntimeError::CallCancelled )));
+		}
+	}
+}
+
+impl Drop for AsyncRequest {
+	fn drop( &mut self ) {
+		if let Some( response ) = self.response.take() {
+			let _ = response.send( Err( runtime_error( AsyncRuntimeError::CallCancelled )));
+		}
+	}
 }
 
 struct PluginState<Ctx: 'static> {
@@ -104,7 +138,6 @@ struct PluginState<Ctx: 'static> {
 
 #[derive( Clone, Debug, Error, Eq, PartialEq )]
 enum AsyncRuntimeError {
-	#[error( "async dispatch session unavailable" )] SessionUnavailable,
 	#[error( "plugin dispatch ended without a response" )] MissingResponse,
 	#[error( "plugin dispatch driver stopped" )] DriverStopped,
 	#[error( "plugin call was cancelled before producing a response" )] CallCancelled,
@@ -127,9 +160,9 @@ impl<Ctx: std::fmt::Debug + 'static> std::fmt::Debug for PluginInstanceSync<Ctx>
 impl<Ctx: 'static> std::fmt::Debug for PluginInstanceAsync<Ctx> {
 	fn fmt( &self, f: &mut std::fmt::Formatter<'_> ) -> std::result::Result<(), std::fmt::Error> {
 		f.debug_struct( "PluginInstanceAsync" )
-			.field( "state", &match &self.kind {
-				PluginInstanceAsyncKind::Async( _ ) => "<session-managed async store>",
-				PluginInstanceAsyncKind::Sync { .. } => "<session-managed sync store>",
+			.field( "state", &match &self.instance {
+				AsyncInstance::Native( _ ) => "<session-managed async store>",
+				AsyncInstance::AdaptedSync( _ ) => "<session-managed sync store>",
 			})
 			.finish_non_exhaustive()
 	}
@@ -181,19 +214,18 @@ impl<Ctx: PluginContext + 'static> PluginInstanceSync<Ctx> {
 		store: Store<Ctx>,
 		instance: Instance,
 		interface_remaps: HashMap<String, Remap>,
-		export_asyncness: ExportAsyncness,
-		mut session_locks: Vec<crate::dispatch_session::SessionLock>,
+		export_effects: ExportEffects,
+		graph: PluginGraph,
 		fuel_limiter: Option<CallLimiter<Ctx>>,
 		epoch_limiter: Option<CallLimiter<Ctx>>,
 	) -> Self {
-		session_locks.push( crate::dispatch_session::new_lock() );
 		Self { state: PluginState {
 			store,
 			instance,
 			interface_remaps,
 			fuel_limiter,
 			epoch_limiter,
-		}, export_asyncness, session_locks: Arc::new( crate::dispatch_session::merge_locks( session_locks )) }
+		}, export_effects, graph }
 	}
 
 	pub(crate) fn dispatch(
@@ -214,14 +246,13 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 		store: Store<Ctx>,
 		instance: Instance,
 		interface_remaps: HashMap<String, Remap>,
-		export_asyncness: ExportAsyncness,
-		mut session_locks: Vec<crate::dispatch_session::SessionLock>,
+		export_effects: ExportEffects,
+		runtime: AsyncInstanceRuntime<Ctx>,
 		fuel_limiter: Option<CallLimiter<Ctx>>,
 		epoch_limiter: Option<CallLimiter<Ctx>>,
 	) -> Self {
-		session_locks.push( crate::dispatch_session::new_lock() );
-		let session_locks = Arc::new( crate::dispatch_session::merge_locks( session_locks ));
 		let exported_interface_remaps = interface_remaps.clone();
+		let AsyncInstanceRuntime { graph, scheduler_slot } = runtime;
 		let mut state = PluginState {
 			store,
 			instance,
@@ -230,13 +261,14 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 			epoch_limiter,
 		};
 		Self {
-			kind: PluginInstanceAsyncKind::Async({
+			instance: AsyncInstance::Native({
 				let ( sender, receiver ) = mpsc::unbounded();
-				Arc::new( PluginInstanceAsyncInner {
+				Arc::new( NativeAsyncInstance {
 					sender,
 					interface_remaps: exported_interface_remaps,
-					export_asyncness,
-					session_locks,
+					export_effects,
+					graph,
+					scheduler_slot,
 					driver: StdMutex::new( DriverState::Idle( Box::pin( async move {
 						state.run_requests( receiver ).await
 					}))),
@@ -247,18 +279,7 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 
 	pub(crate) async fn dispatch_async(
 		&self,
-		package_name: &str,
-		interface_name: &str,
-		function_name: &str,
-		function: &Function,
-		data: &[Val],
-	) -> Result<Val, DispatchError> {
-		self.dispatch_async_from( 0, package_name, interface_name, function_name, function, data ).await
-	}
-
-	pub(crate) async fn dispatch_async_from(
-		&self,
-		caller: u64,
+		dispatch: DispatchContext<'_, Ctx>,
 		package_name: &str,
 		interface_name: &str,
 		function_name: &str,
@@ -266,31 +287,44 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 		data: &[Val],
 	) -> Result<Val, DispatchError> {
 		ensure_supported_values( data )?;
-		if let PluginInstanceAsyncKind::Sync { state, .. } = &self.kind {
-			return state.lock().await.dispatch(
-				package_name,
-				interface_name,
-				function_name,
-				function,
-				data,
-			);
-		}
-		let session = crate::dispatch_session::current()
-			.ok_or_else(|| runtime_error( AsyncRuntimeError::SessionUnavailable ))?;
 		let ( response, result ) = oneshot::channel();
 		let request = AsyncRequest {
-			caller,
 			package_name: package_name.to_string(),
 			interface_name: interface_name.to_string(),
 			function_name: function_name.to_string(),
 			function: function.clone(),
 			data: data.to_vec(),
-			response,
+			response: Some( response ),
 		};
-
-		let PluginInstanceAsyncKind::Async( inner ) = &self.kind else { unreachable!() };
-		inner.enqueue( &session, request )?;
+		dispatch.scheduler.schedule( dispatch.caller, dispatch.path, self.clone(), request );
 		result.await.map_err(| _ | runtime_error( AsyncRuntimeError::MissingResponse ))?
+	}
+
+	pub(crate) fn admit( &self, scheduler: &AsyncScheduler<Ctx>, request: AsyncRequest ) {
+		match &self.instance {
+			AsyncInstance::Native( inner ) => inner.enqueue( scheduler, request ),
+			AsyncInstance::AdaptedSync( inner ) => {
+				let inner = Arc::clone( inner );
+				scheduler.attach_driver( Box::pin( async move {
+					let mut state = inner.state.lock().await;
+					let result = state.dispatch(
+						&request.package_name,
+						&request.interface_name,
+						&request.function_name,
+						&request.function,
+						&request.data,
+					);
+					request.respond( result );
+				}));
+			}
+		}
+	}
+
+	pub(crate) fn graph( &self ) -> &PluginGraph {
+		match &self.instance {
+			AsyncInstance::Native( inner ) => &inner.graph,
+			AsyncInstance::AdaptedSync( inner ) => &inner.graph,
+		}
 	}
 
 }
@@ -299,23 +333,23 @@ impl<Ctx: PluginContext + 'static> From<PluginInstanceSync<Ctx>> for PluginInsta
 	/// Makes a synchronous instance usable in an async binding without changing
 	/// how its Wasmtime store was instantiated.
 	fn from( instance: PluginInstanceSync<Ctx> ) -> Self {
-		let PluginInstanceSync { state, export_asyncness, session_locks } = instance;
-		let interface_remaps = Arc::new( state.interface_remaps.clone() );
-		Self { kind: PluginInstanceAsyncKind::Sync {
-			state: Arc::new( Mutex::new( state )),
+		let PluginInstanceSync { state, export_effects, graph } = instance;
+		let interface_remaps = state.interface_remaps.clone();
+		Self { instance: AsyncInstance::AdaptedSync( Arc::new( AdaptedSyncInstance {
+			state: Mutex::new( state ),
 			interface_remaps,
-			export_asyncness: Arc::new( export_asyncness ),
-			session_locks,
-		}}
+			export_effects,
+			graph,
+		}))}
 	}
 }
 
 impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceSync<Ctx> {
-	fn session_locks( &self ) -> &[crate::dispatch_session::SessionLock] { &self.session_locks }
+	fn graph( &self ) -> &PluginGraph { &self.graph }
 
 	fn export_is_async( &self, package_name: &str, interface_name: &str, function_name: &str ) -> bool {
 		export_is_async(
-			&self.export_asyncness,
+			&self.export_effects,
 			&self.state.interface_remaps,
 			package_name,
 			interface_name,
@@ -325,25 +359,25 @@ impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceSync<Ctx> 
 }
 
 impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceAsync<Ctx> {
-	fn session_locks( &self ) -> &[crate::dispatch_session::SessionLock] {
-		match &self.kind {
-			PluginInstanceAsyncKind::Async( inner ) => &inner.session_locks,
-			PluginInstanceAsyncKind::Sync { session_locks, .. } => session_locks,
+	fn graph( &self ) -> &PluginGraph {
+		match &self.instance {
+			AsyncInstance::Native( inner ) => &inner.graph,
+			AsyncInstance::AdaptedSync( inner ) => &inner.graph,
 		}
 	}
 
 	fn export_is_async( &self, package_name: &str, interface_name: &str, function_name: &str ) -> bool {
-		match &self.kind {
-			PluginInstanceAsyncKind::Async( inner ) => export_is_async(
-				&inner.export_asyncness,
+		match &self.instance {
+			AsyncInstance::Native( inner ) => export_is_async(
+				&inner.export_effects,
 				&inner.interface_remaps,
 				package_name,
 				interface_name,
 				function_name,
 			),
-			PluginInstanceAsyncKind::Sync { interface_remaps, export_asyncness, .. } => export_is_async(
-				export_asyncness,
-				interface_remaps,
+			AsyncInstance::AdaptedSync( inner ) => export_is_async(
+				&inner.export_effects,
+				&inner.interface_remaps,
 				package_name,
 				interface_name,
 				function_name,
@@ -352,35 +386,43 @@ impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceAsync<Ctx>
 	}
 }
 
-impl PluginInstanceAsyncInner {
+impl<Ctx: PluginContext + 'static> NativeAsyncInstance<Ctx> {
 	fn enqueue(
 		self: &Arc<Self>,
-		session: &Arc<crate::dispatch_session::SessionShared>,
+		scheduler: &AsyncScheduler<Ctx>,
 		request: AsyncRequest,
-	) -> Result<(), DispatchError> {
+	) {
 		let mut driver = self.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
 		let future = match std::mem::replace( &mut *driver, DriverState::Attached ) {
 			DriverState::Idle( future ) => Some( future ),
 			DriverState::Attached => None,
 			DriverState::Failed( error ) => {
 				*driver = DriverState::Failed( error.clone() );
-				return Err( runtime_error( error ));
+				request.respond( Err( runtime_error( error )));
+				return;
 			}
 		};
-		if self.sender.unbounded_send( request ).is_err() {
+		if let Err( error ) = self.sender.unbounded_send( DriverMessage::Call( request )) {
 			*driver = DriverState::Failed( AsyncRuntimeError::DriverStopped );
-			return Err( runtime_error( AsyncRuntimeError::DriverStopped ));
+			if let DriverMessage::Call( request ) = error.into_inner() {
+				request.respond( Err( runtime_error( AsyncRuntimeError::DriverStopped )));
+			}
+			return;
 		}
 		drop( driver );
 		if let Some( future ) = future {
-				session.spawn( Box::pin( AttachedDriver {
-					inner: Arc::clone( self ),
-					future: Some( future ),
-				}));
+			let slot = self.scheduler_slot.attach( scheduler );
+			scheduler.attach_driver( Box::pin( AttachedDriver {
+				inner: Arc::clone( self ),
+				future: Some( future ),
+				_slot: slot,
+			}));
 		}
-		Ok(())
 	}
 
+}
+
+impl<Ctx: 'static> NativeAsyncInstance<Ctx> {
 	fn release( &self, future: DriverFuture ) {
 		*self.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner ) = DriverState::Idle( future );
 	}
@@ -390,12 +432,13 @@ impl PluginInstanceAsyncInner {
 	}
 }
 
-struct AttachedDriver {
-	inner: Arc<PluginInstanceAsyncInner>,
+struct AttachedDriver<Ctx: 'static> {
+	inner: Arc<NativeAsyncInstance<Ctx>>,
 	future: Option<DriverFuture>,
+	_slot: SchedulerSlotGuard<Ctx>,
 }
 
-impl Future for AttachedDriver {
+impl<Ctx: PluginContext + 'static> Future for AttachedDriver<Ctx> {
 	type Output = ();
 
 	fn poll( mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_> ) -> std::task::Poll<()> {
@@ -414,9 +457,12 @@ impl Future for AttachedDriver {
 	}
 }
 
-impl Drop for AttachedDriver {
+impl<Ctx: 'static> Drop for AttachedDriver<Ctx> {
 	fn drop( &mut self ) {
-		if let Some( future ) = self.future.take() { self.inner.release( future ); }
+		if let Some( future ) = self.future.take() {
+			let _ = self.inner.sender.unbounded_send( DriverMessage::Reset );
+			self.inner.release( future );
+		}
 	}
 }
 
@@ -456,32 +502,64 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 		Self::finish_call( function, buffer, call_result )
 	}
 
-	async fn run_requests( &mut self, mut receiver: mpsc::UnboundedReceiver<AsyncRequest> ) -> AsyncRuntimeError {
+	async fn run_requests(
+		&mut self,
+		mut receiver: mpsc::UnboundedReceiver<DriverMessage>,
+	) -> AsyncRuntimeError {
 		if self.fuel_limiter.is_some() || self.epoch_limiter.is_some() {
-			while let Some( request ) = receiver.next().await {
-				let result = self.dispatch_async(
+			let mut queued = std::collections::VecDeque::new();
+			loop {
+				let message = match queued.pop_front() {
+					Some( request ) => DriverMessage::Call( request ),
+					None => match receiver.next().await {
+						Some( message ) => message,
+						None => return AsyncRuntimeError::RequestChannelClosed,
+					},
+				};
+				let DriverMessage::Call( mut request ) = message else { continue };
+				let mut response = request.response.take();
+				let call = self.dispatch_async(
 					&request.package_name,
 					&request.interface_name,
 					&request.function_name,
 					&request.function,
 					&request.data,
-				).await;
-				let _ = request.response.send( result );
+				).fuse();
+				futures::pin_mut!( call );
+				loop {
+					futures::select_biased! {
+						message = receiver.next().fuse() => match message {
+							Some( DriverMessage::Reset ) => {
+								if let Some( response ) = response.take() {
+									let _ = response.send( Err( runtime_error( AsyncRuntimeError::CallCancelled )));
+								}
+								queued.clear();
+								break;
+							},
+							Some( DriverMessage::Call( pending )) => queued.push_back( pending ),
+							None => {
+								let result = call.await;
+								if let Some( response ) = response.take() { let _ = response.send( result ); }
+								break;
+							},
+						},
+						result = call => {
+							if let Some( response ) = response.take() { let _ = response.send( result ); }
+							break;
+						},
+					}
+				}
 			}
-			return AsyncRuntimeError::RequestChannelClosed;
 		}
 
 		let instance = self.instance;
 		let interface_remaps = &self.interface_remaps;
 		let run_result = self.store.run_concurrent( async | accessor | {
-			let mut queues = RequestQueues::default();
 			let mut calls = FuturesUnordered::<BoxFuture<'_, ()>>::new();
 			loop {
 				if calls.is_empty() {
-					let Some( request ) = receiver.next().await else { return };
-					queues.push( request );
-					while let Ok( request ) = receiver.try_recv() { queues.push( request ); }
-					while let Some( request ) = queues.pop() {
+					let Some( message ) = receiver.next().await else { return };
+					if let DriverMessage::Call( request ) = message {
 						start_concurrent_call( accessor, instance, interface_remaps, request, &mut calls );
 					}
 					continue;
@@ -492,13 +570,8 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 				futures::pin_mut!( request, completed );
 				futures::select_biased! {
 					request = request => match request {
-						Some( request ) => {
-							queues.push( request );
-							while let Ok( request ) = receiver.try_recv() { queues.push( request ); }
-							while let Some( request ) = queues.pop() {
-								start_concurrent_call( accessor, instance, interface_remaps, request, &mut calls );
-							}
-						}
+						Some( DriverMessage::Call( request )) => start_concurrent_call( accessor, instance, interface_remaps, request, &mut calls ),
+						Some( DriverMessage::Reset ) => calls = FuturesUnordered::new(),
 						None => while calls.next().await.is_some() {},
 					},
 					_ = completed => {},
@@ -508,8 +581,10 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 
 		if let Err( error ) = run_result {
 			let error = AsyncRuntimeError::StoreFailed( error.to_string() );
-			while let Ok( request ) = receiver.try_recv() {
-				let _ = request.response.send( Err( runtime_error( error.clone() )));
+			while let Ok( message ) = receiver.try_recv() {
+				if let DriverMessage::Call( request ) = message {
+					request.respond( Err( runtime_error( error.clone() )));
+				}
 			}
 			return error;
 		}
@@ -572,33 +647,6 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 
 }
 
-#[derive( Default )]
-struct RequestQueues {
-	callers: VecDeque<u64>,
-	requests: HashMap<u64, VecDeque<AsyncRequest>>,
-}
-
-impl RequestQueues {
-	fn push( &mut self, request: AsyncRequest ) {
-		let caller = request.caller;
-		let requests = self.requests.entry( caller ).or_default();
-		if requests.is_empty() { self.callers.push_back( caller ); }
-		requests.push_back( request );
-	}
-
-	fn pop( &mut self ) -> Option<AsyncRequest> {
-		let caller = self.callers.pop_front()?;
-		let requests = self.requests.get_mut( &caller )?;
-		let request = requests.pop_front();
-		if requests.is_empty() {
-			self.requests.remove( &caller );
-		} else {
-			self.callers.push_back( caller );
-		}
-		request
-	}
-}
-
 fn start_concurrent_call<'a, Ctx: PluginContext + 'static>(
 	accessor: &'a Accessor<Ctx>,
 	instance: Instance,
@@ -624,7 +672,7 @@ fn start_concurrent_call<'a, Ctx: PluginContext + 'static>(
 	let function = match function {
 		Ok( function ) => function,
 		Err( error ) => {
-			let _ = request.response.send( Err( error ));
+			request.respond( Err( error ));
 			return;
 		}
 	};
@@ -638,11 +686,11 @@ fn start_concurrent_call<'a, Ctx: PluginContext + 'static>(
 fn concurrent_call<Ctx: PluginContext + 'static>(
 	accessor: &Accessor<Ctx>,
 	function: Func,
-	request: AsyncRequest,
+	mut request: AsyncRequest,
 	mut results: Vec<Val>,
 ) -> BoxFuture<'_, ()> {
 	Box::pin( async move {
-		let mut response = ResponseGuard::new( request.response );
+		let mut response = ResponseGuard::new( request.response.take() );
 		let call_result = function.call_concurrent( accessor, &request.data, &mut results ).await;
 		response.send( PluginState::<Ctx>::finish_call( &request.function, results, call_result ));
 	})
@@ -653,8 +701,8 @@ struct ResponseGuard {
 }
 
 impl ResponseGuard {
-	fn new( response: oneshot::Sender<Result<Val, DispatchError>> ) -> Self {
-		Self { response: Some( response ) }
+	fn new( response: Option<oneshot::Sender<Result<Val, DispatchError>>> ) -> Self {
+		Self { response }
 	}
 
 	fn send( &mut self, result: Result<Val, DispatchError> ) {
@@ -688,7 +736,7 @@ fn resolve_export(
 }
 
 fn export_is_async(
-	export_asyncness: &ExportAsyncness,
+	export_effects: &ExportEffects,
 	interface_remaps: &HashMap<String, Remap>,
 	package_name: &str,
 	interface_name: &str,
@@ -700,7 +748,7 @@ fn export_is_async(
 		interface_name,
 		function_name,
 	);
-	export_asyncness.get( &interface_path )
+	export_effects.get( &interface_path )
 		.and_then(| functions | functions.get( &function_name ))
 		.copied()
 		.unwrap_or( false )

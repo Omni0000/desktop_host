@@ -1,18 +1,14 @@
 use std::future::Future ;
+use std::sync::Arc ;
+
 use wasmtime::{ Config, Engine, Store };
 use wasmtime::component::{ Component, FutureReader, Linker, ResourceTable, StreamReader, Val };
 
 use super::{
-	AsyncRequest,
-	AsyncRuntimeError,
-	AttachedDriver,
-	DriverState,
-	PluginInstanceAsync,
-	PluginState,
-	PluginInstanceAsyncInner,
-	RequestQueues,
-	ensure_supported_value,
+	AsyncInstanceRuntime, AsyncRequest, AsyncRuntimeError, AttachedDriver, DriverMessage,
+	DriverState, NativeAsyncInstance, PluginInstanceAsync, PluginState, ensure_supported_value,
 };
+use crate::async_scheduler::{ AsyncScheduler, DispatchContext, PluginGraph, SchedulerSlot };
 use crate::{ DispatchError, Function, FunctionKind, PluginContext, ReturnKind };
 
 struct Context { table: ResourceTable }
@@ -22,131 +18,61 @@ impl PluginContext for Context {
 }
 
 #[test]
-fn async_requests_are_fifo_per_caller_and_round_robin_between_callers() {
-	fn request( caller: u64, name: &str ) -> AsyncRequest {
-		let ( response, _ ) = futures::channel::oneshot::channel();
-		AsyncRequest {
-			caller,
-			package_name: String::new(),
-			interface_name: String::new(),
-			function_name: name.to_string(),
-			function: Function::new( FunctionKind::Freestanding, ReturnKind::AssumeNoResources ),
-			data: Vec::new(),
-			response,
-		}
-	}
-
-	let mut queues = RequestQueues::default();
-	queues.push( request( 1, "a1" ));
-	queues.push( request( 1, "a2" ));
-	queues.push( request( 2, "b1" ));
-	queues.push( request( 2, "b2" ));
-	let order = std::iter::from_fn(|| queues.pop().map(| request | request.function_name ))
-		.collect::<Vec<_>>();
-	assert_eq!( order, [ "a1", "b1", "a2", "b2" ]);
+fn dropping_a_request_reports_the_exact_cancellation_error() -> Result<(), Box<dyn std::error::Error>> {
+	let ( request, result ) = request( "get-value" );
+	drop( request );
+	assert_runtime_error( futures::executor::block_on( result )?, &AsyncRuntimeError::CallCancelled )?;
+	Ok(())
 }
 
 #[test]
-fn dropped_response_guard_reports_the_cancellation_error() {
-	let ( response, result ) = futures::channel::oneshot::channel();
-	drop( super::ResponseGuard::new( response ));
-	let Ok( Err( DispatchError::RuntimeException( error ))) = futures::executor::block_on( result ) else {
-		panic!( "dropping the response guard did not return a runtime exception" );
-	};
-	assert_eq!( error.downcast_ref(), Some( &super::AsyncRuntimeError::CallCancelled ));
-}
-
-#[test]
-fn failed_driver_rejects_later_calls_with_the_exact_error() {
+fn failed_driver_rejects_later_calls_with_the_exact_error() -> Result<(), Box<dyn std::error::Error>> {
 	let expected = AsyncRuntimeError::StoreFailed( "expected".to_string() );
 	let ( sender, _receiver ) = futures::channel::mpsc::unbounded();
-	let inner = std::sync::Arc::new( PluginInstanceAsyncInner {
-		sender,
-		driver: std::sync::Mutex::new( DriverState::Failed( expected.clone() )),
-		interface_remaps: std::collections::HashMap::new(),
-		export_asyncness: std::collections::HashMap::new(),
-		session_locks: std::sync::Arc::new( Vec::new() ),
-	});
-	let ( response, _result ) = futures::channel::oneshot::channel();
-	let result = inner.enqueue(
-		&crate::dispatch_session::SessionShared::new(),
-		request( 0, "call", response ),
-	);
-	let Err( error ) = result else { panic!( "a failed driver accepted a later call" )};
-	let DispatchError::RuntimeException( error ) = error else {
-		panic!( "failed driver did not return a runtime exception" );
-	};
-	assert_eq!( error.downcast_ref(), Some( &expected ));
+	let inner = native_inner( sender, DriverState::Failed( expected.clone() ));
+	let ( request, result ) = request( "get-value" );
+	inner.enqueue( &AsyncScheduler::testing(), request );
+	assert_runtime_error( futures::executor::block_on( result )?, &expected )
 }
 
 #[test]
-fn stopped_driver_rejects_the_request_with_the_exact_error() {
+fn stopped_driver_rejects_the_request_with_the_exact_error() -> Result<(), Box<dyn std::error::Error>> {
 	let ( sender, receiver ) = futures::channel::mpsc::unbounded();
 	drop( receiver );
-	let inner = std::sync::Arc::new( PluginInstanceAsyncInner {
-		sender,
-		driver: std::sync::Mutex::new( DriverState::Idle( Box::pin( futures::future::pending() ))),
-		interface_remaps: std::collections::HashMap::new(),
-		export_asyncness: std::collections::HashMap::new(),
-		session_locks: std::sync::Arc::new( Vec::new() ),
-	});
-	let ( response, _result ) = futures::channel::oneshot::channel();
-	let result = inner.enqueue(
-		&crate::dispatch_session::SessionShared::new(),
-		request( 0, "call", response ),
-	);
-	let Err( error ) = result else { panic!( "a stopped driver accepted the request" )};
-	let DispatchError::RuntimeException( error ) = error else {
-		panic!( "stopped driver did not return a runtime exception" );
-	};
-	assert_eq!( error.downcast_ref(), Some( &AsyncRuntimeError::DriverStopped ));
+	let inner = native_inner( sender, DriverState::Idle( Box::pin( futures::future::pending() )));
+	let ( request, result ) = request( "get-value" );
+	inner.enqueue( &AsyncScheduler::testing(), request );
+	assert_runtime_error( futures::executor::block_on( result )?, &AsyncRuntimeError::DriverStopped )
 }
 
 #[test]
-fn async_dispatch_reports_exact_session_errors() {
-	let ( sender, receiver ) = futures::channel::mpsc::unbounded();
-	let plugin: PluginInstanceAsync<Context> = PluginInstanceAsync { kind: super::PluginInstanceAsyncKind::Async(
-		std::sync::Arc::new( PluginInstanceAsyncInner {
-			sender,
-			driver: std::sync::Mutex::new( DriverState::Idle( Box::pin( async move {
-				drop( receiver );
-				AsyncRuntimeError::DriverStopped
-			}))),
-			interface_remaps: std::collections::HashMap::new(),
-			export_asyncness: std::collections::HashMap::new(),
-			session_locks: std::sync::Arc::new( Vec::new() ),
-		}),
-	)};
-	let function = Function::new( FunctionKind::Freestanding, ReturnKind::AssumeNoResources );
-	let result = futures::executor::block_on( plugin.dispatch_async( "test", "root", "call", &function, &[] ));
-	let Err( DispatchError::RuntimeException( error )) = result else {
-		panic!( "dispatch without a session did not return a runtime exception" );
-	};
-	assert_eq!( error.downcast_ref(), Some( &AsyncRuntimeError::SessionUnavailable ));
-
-	let result = futures::executor::block_on( crate::dispatch_session::run( Vec::new(), async move {
-		plugin.dispatch_async( "test", "root", "call", &function, &[] ).await
-	}));
-	let Err( DispatchError::RuntimeException( error )) = result else {
-		panic!( "dropped response did not return a runtime exception" );
-	};
-	assert_eq!( error.downcast_ref(), Some( &AsyncRuntimeError::MissingResponse ));
+fn closed_scheduler_rejects_a_call_with_the_exact_cancellation_error() -> Result<(), Box<dyn std::error::Error>> {
+	let state = test_state_without_concurrency()?;
+	let graph = PluginGraph::new( Vec::new() );
+	let plugin = PluginInstanceAsync::from( super::PluginInstanceSync {
+		state,
+		export_effects: std::collections::HashMap::new(),
+		graph,
+	});
+	let scheduler = AsyncScheduler::testing();
+	let path = scheduler.root_path();
+	scheduler.close();
+	let ( request, result ) = request( "get-value" );
+	scheduler.schedule( scheduler.origin(), path, plugin, request );
+	assert_runtime_error( futures::executor::block_on( result )?, &AsyncRuntimeError::CallCancelled )
 }
 
 #[test]
-fn attached_driver_records_its_exact_terminal_error() {
-	let ( sender, _receiver ) = futures::channel::mpsc::unbounded();
-	let inner = std::sync::Arc::new( PluginInstanceAsyncInner {
-		sender,
-		driver: std::sync::Mutex::new( DriverState::Attached ),
-		interface_remaps: std::collections::HashMap::new(),
-		export_asyncness: std::collections::HashMap::new(),
-		session_locks: std::sync::Arc::new( Vec::new() ),
-	});
+fn attached_driver_records_its_exact_terminal_error() -> Result<(), Box<dyn std::error::Error>> {
 	let expected = AsyncRuntimeError::StoreFailed( "expected".to_string() );
+	let ( sender, _receiver ) = futures::channel::mpsc::unbounded();
+	let inner = native_inner( sender, DriverState::Attached );
+	let scheduler = AsyncScheduler::testing();
+	let slot = inner.scheduler_slot.attach( &scheduler );
 	let mut driver = Box::pin( AttachedDriver {
-		inner: std::sync::Arc::clone( &inner ),
+		inner: Arc::clone( &inner ),
 		future: Some( Box::pin( futures::future::ready( expected.clone() ))),
+		_slot: slot,
 	});
 	let waker = futures::task::noop_waker();
 	let mut context = std::task::Context::from_waker( &waker );
@@ -154,26 +80,30 @@ fn attached_driver_records_its_exact_terminal_error() {
 	assert!( driver.as_mut().poll( &mut context ).is_ready() );
 	let state = inner.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
 	assert!( matches!( &*state, DriverState::Failed( error ) if error == &expected ));
+	Ok(())
 }
 
 #[test]
-fn store_failure_reaches_pending_calls_as_the_exact_runtime_error() -> Result<(), Box<dyn std::error::Error>> {
+fn store_failure_reaches_the_call_as_the_exact_runtime_error() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
 		let PluginState { store, instance, .. } = test_state_without_concurrency()?;
+		let graph = PluginGraph::new( Vec::new() );
 		let plugin = PluginInstanceAsync::new(
 			store,
 			instance,
 			std::collections::HashMap::new(),
 			std::collections::HashMap::new(),
-			Vec::new(),
+			AsyncInstanceRuntime::new( graph.clone(), SchedulerSlot::new() ),
 			None,
 			None,
 		);
 		let expected = AsyncRuntimeError::StoreFailed(
 			"cannot use `run_concurrent` when Config::concurrency_support disabled".to_string(),
 		);
-		let result = crate::dispatch_session::run( Vec::new(), async move {
+		let result = crate::async_scheduler::run( vec![ graph ], move | scheduler | async move {
+			let path = scheduler.root_path();
 			plugin.dispatch_async(
+				DispatchContext::new( &scheduler, scheduler.origin(), path ),
 				"test:single-plugin",
 				"root",
 				"get-value",
@@ -181,29 +111,17 @@ fn store_failure_reaches_pending_calls_as_the_exact_runtime_error() -> Result<()
 				&[],
 			).await
 		}).await;
-		let Err( DispatchError::RuntimeException( error )) = result else {
-			panic!( "pending call did not receive a runtime exception" );
-		};
-		assert_eq!( error.downcast_ref(), Some( &expected ));
-		Ok(())
+		assert_runtime_error( result, &expected )
 	})
 }
 
 #[test]
-fn driver_finishes_admitted_calls_before_reporting_channel_shutdown() -> Result<(), Box<dyn std::error::Error>> {
+fn concurrent_driver_finishes_an_admitted_call_before_shutdown() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
 		let mut state = test_state().await?;
 		let ( sender, receiver ) = futures::channel::mpsc::unbounded();
-		let ( response, result ) = futures::channel::oneshot::channel();
-		assert!( sender.unbounded_send( AsyncRequest {
-			caller: 0,
-			package_name: "test:single-async".to_string(),
-			interface_name: "root".to_string(),
-			function_name: "get-value".to_string(),
-			function: Function::new( FunctionKind::Freestanding, ReturnKind::AssumeNoResources ),
-			data: Vec::new(),
-			response,
-		}).is_ok() );
+		let ( request, result ) = request( "get-value" );
+		sender.unbounded_send( DriverMessage::Call( request ))?;
 		drop( sender );
 		assert_eq!( state.run_requests( receiver ).await, AsyncRuntimeError::DriverStopped );
 		assert!( matches!( result.await, Ok( Ok( Val::U32( 42 )))));
@@ -212,53 +130,91 @@ fn driver_finishes_admitted_calls_before_reporting_channel_shutdown() -> Result<
 }
 
 #[test]
-fn concurrent_driver_reports_exact_export_lookup_errors() -> Result<(), Box<dyn std::error::Error>> {
+fn limited_driver_queues_calls_and_finishes_them_before_shutdown() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
-		let mut state = test_lookup_state().await?;
+		let mut state = test_blocking_state().await?;
+		state.epoch_limiter = Some( Box::new(| _, _, _, _ | u64::MAX ));
 		let ( sender, receiver ) = futures::channel::mpsc::unbounded();
-		let ( missing_interface_response, missing_interface ) = futures::channel::oneshot::channel();
-		let mut missing_interface_request = request( 0, "get-value", missing_interface_response );
-		missing_interface_request.package_name = "missing".to_string();
-		missing_interface_request.interface_name = "root".to_string();
-		assert!( sender.unbounded_send( missing_interface_request ).is_ok() );
-		let ( missing_function_response, missing_function ) = futures::channel::oneshot::channel();
-		let mut missing_function_request = request( 0, "missing", missing_function_response );
-		missing_function_request.package_name = "test:dispatch-error".to_string();
-		missing_function_request.interface_name = "root".to_string();
-		assert!( sender.unbounded_send( missing_function_request ).is_ok() );
-		let ( non_function_response, non_function ) = futures::channel::oneshot::channel();
-		let mut non_function_request = request( 0, "not-a-function", non_function_response );
-		non_function_request.package_name = "test:dispatch-error".to_string();
-		non_function_request.interface_name = "root".to_string();
-		assert!( sender.unbounded_send( non_function_request ).is_ok() );
+		let ( first, first_result ) = blocking_request( "get-primitive" );
+		let ( second, second_result ) = blocking_request( "get-primitive" );
+		sender.unbounded_send( DriverMessage::Call( first ))?;
+		sender.unbounded_send( DriverMessage::Call( second ))?;
 		drop( sender );
-		assert_eq!( state.run_requests( receiver ).await, AsyncRuntimeError::DriverStopped );
-		assert!( matches!(
-			missing_interface.await,
-			Ok( Err( DispatchError::InvalidInterfacePath( path ))) if path == "missing/root"
-		));
-		assert!( matches!(
-			missing_function.await,
-			Ok( Err( DispatchError::InvalidFunction( name ))) if name == "test:dispatch-error/root:missing"
-		));
-		assert!( matches!(
-			non_function.await,
-			Ok( Err( DispatchError::InvalidFunction( name ))) if name == "test:dispatch-error/root:not-a-function"
-		));
+		assert_eq!( state.run_requests( receiver ).await, AsyncRuntimeError::RequestChannelClosed );
+		let first = first_result.await?;
+		let second = second_result.await?;
+		assert!( matches!( first, Ok( Val::U32( 42 ))), "unexpected first result: {first:?}" );
+		assert!( matches!( second, Ok( Val::U32( 42 ))), "unexpected second result: {second:?}" );
 		Ok(())
 	})
 }
 
 #[test]
-fn limited_driver_reports_exact_channel_shutdown() -> Result<(), Box<dyn std::error::Error>> {
+fn limited_driver_reset_cancels_the_exact_active_call() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
 		let mut state = test_state().await?;
-		state.fuel_limiter = Some( Box::new(| _, _, _, _ | 1 ));
+		state.epoch_limiter = Some( Box::new(| _, _, _, _ | u64::MAX ));
 		let ( sender, receiver ) = futures::channel::mpsc::unbounded();
+		let ( request, result ) = request( "get-value" );
+		sender.unbounded_send( DriverMessage::Call( request ))?;
+		sender.unbounded_send( DriverMessage::Reset )?;
 		drop( sender );
 		assert_eq!( state.run_requests( receiver ).await, AsyncRuntimeError::RequestChannelClosed );
-		Ok(())
+		assert_runtime_error( result.await?, &AsyncRuntimeError::CallCancelled )
 	})
+}
+
+fn native_inner(
+	sender: futures::channel::mpsc::UnboundedSender<DriverMessage>,
+	driver: DriverState,
+) -> Arc<NativeAsyncInstance<Context>> {
+	Arc::new( NativeAsyncInstance {
+		sender,
+		driver: std::sync::Mutex::new( driver ),
+		interface_remaps: std::collections::HashMap::new(),
+		export_effects: std::collections::HashMap::new(),
+		graph: PluginGraph::new( Vec::new() ),
+		scheduler_slot: SchedulerSlot::new(),
+	})
+}
+
+fn request(
+	name: &str,
+) -> (
+	AsyncRequest,
+	futures::channel::oneshot::Receiver<Result<Val, DispatchError>>,
+) {
+	let ( response, result ) = futures::channel::oneshot::channel();
+	( AsyncRequest {
+		package_name: "test:single-async".to_string(),
+		interface_name: "root".to_string(),
+		function_name: name.to_string(),
+		function: Function::new( FunctionKind::Freestanding, ReturnKind::AssumeNoResources ),
+		data: Vec::new(),
+		response: Some( response ),
+	}, result )
+}
+
+fn blocking_request(
+	name: &str,
+) -> (
+	AsyncRequest,
+	futures::channel::oneshot::Receiver<Result<Val, DispatchError>>,
+) {
+	let ( mut request, result ) = request( name );
+	request.package_name = "test:primitive".to_string();
+	( request, result )
+}
+
+fn assert_runtime_error(
+	result: Result<Val, DispatchError>,
+	expected: &AsyncRuntimeError,
+) -> Result<(), Box<dyn std::error::Error>> {
+	let Err( DispatchError::RuntimeException( error )) = result else {
+		return Err( format!( "expected RuntimeException, found {result:?}" ).into() );
+	};
+	assert_eq!( error.downcast_ref::<AsyncRuntimeError>(), Some( expected ));
+	Ok(())
 }
 
 async fn test_state() -> Result<PluginState<Context>, Box<dyn std::error::Error>> {
@@ -279,11 +235,11 @@ async fn test_state() -> Result<PluginState<Context>, Box<dyn std::error::Error>
 	})
 }
 
-async fn test_lookup_state() -> Result<PluginState<Context>, Box<dyn std::error::Error>> {
+async fn test_blocking_state() -> Result<PluginState<Context>, Box<dyn std::error::Error>> {
 	let engine = Engine::default();
 	let component = Component::from_file(
 		&engine,
-		concat!( env!( "CARGO_MANIFEST_DIR" ), "/tests/dispatch_error/invalid_function/plugins/test-plugin/root.wat" ),
+		concat!( env!( "CARGO_MANIFEST_DIR" ), "/tests/dispatching/single_plugin_expect_primitive/plugins/get-value/root.wat" ),
 	)?;
 	let linker = Linker::<Context>::new( &engine );
 	let mut store = Store::new( &engine, Context { table: ResourceTable::new() });
@@ -315,22 +271,6 @@ fn test_state_without_concurrency() -> Result<PluginState<Context>, wasmtime::Er
 		fuel_limiter: None,
 		epoch_limiter: None,
 	})
-}
-
-fn request(
-	caller: u64,
-	name: &str,
-	response: futures::channel::oneshot::Sender<Result<Val, DispatchError>>,
-) -> AsyncRequest {
-	AsyncRequest {
-		caller,
-		package_name: String::new(),
-		interface_name: String::new(),
-		function_name: name.to_string(),
-		function: Function::new( FunctionKind::Freestanding, ReturnKind::AssumeNoResources ),
-		data: Vec::new(),
-		response,
-	}
 }
 
 #[test]

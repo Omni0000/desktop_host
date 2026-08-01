@@ -362,7 +362,7 @@ mod plugin ;
 mod plugin_instance ;
 mod remap ;
 pub mod cardinality ;
-mod dispatch_session ;
+mod async_scheduler ;
 #[cfg(test)] mod cardinality_tests ;
 #[cfg(test)] mod interface_tests ;
 mod linker ;

@@ -6,17 +6,16 @@
 //! the plugin expects to import from other plugins.
 
 use std::collections::HashMap ;
-use std::sync::atomic::{ AtomicU64, Ordering };
+use std::sync::Arc;
 use wasmtime::{ Engine, Store };
 use wasmtime::component::{ Component, ResourceTable, Linker, Val };
 
 use crate::{ BindingAny, BindingAnyAsync };
 use crate::binding::ImportMetadata ;
-use crate::plugin_instance::{ ExportAsyncness, PluginInstanceAsync, PluginInstanceSync };
+use crate::plugin_instance::{ AsyncInstanceRuntime, ExportEffects, PluginInstanceAsync, PluginInstanceSync };
+use crate::async_scheduler::{ PluginGraph, SchedulerSlot };
 use crate::Function ;
 use crate::Remap ;
-
-static NEXT_CALLER_ID: AtomicU64 = AtomicU64::new( 1 );
 
 /// Trait for accessing a [`ResourceTable`] from the store's data type.
 ///
@@ -297,9 +296,9 @@ where
 		Sockets::Item: Into<BindingAny<PluginId, Ctx>>,
 	{
 		let sockets = sockets.into_iter().map( Into::into ).collect::<Vec<_>>();
-		let session_locks = sockets.iter().flat_map( BindingAny::session_locks ).collect();
+		let graph = PluginGraph::new( sockets.iter().flat_map( BindingAny::graphs ).collect() );
 		sockets.iter().try_for_each(| binding | binding.add_to_linker( &mut linker ))?;
-		self.instantiate_with_locks( engine, &linker, session_locks )
+		self.instantiate_with_graph( engine, &linker, graph )
 	}
 
 	/// Asynchronously links this plugin with its socket bindings and instantiates it.
@@ -344,7 +343,6 @@ where
 		Sockets: IntoIterator,
 		Sockets::Item: Into<BindingAnyAsync<PluginId, Ctx>>,
 	{
-		let caller_id = NEXT_CALLER_ID.fetch_add( 1, Ordering::Relaxed );
 		let mut import_asyncness = HashMap::new();
 		for ( import_name, import ) in self.component.component_type().imports( engine ) {
 			let wasmtime::component::types::ComponentItem::ComponentInstance( instance ) = import.ty else { continue; };
@@ -360,11 +358,12 @@ where
 			});
 		}
 		let sockets = sockets.into_iter().map( Into::into ).collect::<Vec<_>>();
-		let session_locks = sockets.iter().flat_map( BindingAnyAsync::session_locks ).collect();
+		let graph = PluginGraph::new( sockets.iter().flat_map( BindingAnyAsync::graphs ).collect() );
+		let scheduler_slot = SchedulerSlot::new();
 		sockets.iter().try_for_each(| binding |
-			binding.add_to_linker( &mut linker, caller_id, &import_asyncness )
+			binding.add_to_linker( &mut linker, graph.key(), &scheduler_slot, &import_asyncness )
 		)?;
-		self.instantiate_async_with_locks( engine, &linker, session_locks ).await
+		self.instantiate_async_with_graph( engine, &linker, graph, scheduler_slot ).await
 	}
 
 	/// A convenience alias for [`Plugin::link`] with 0 sockets
@@ -376,16 +375,16 @@ where
 		engine: &Engine,
 		linker: &Linker<Ctx>
 	) -> Result<PluginInstanceSync<Ctx>, wasmtime::Error> {
-		self.instantiate_with_locks( engine, linker, Vec::new() )
+		self.instantiate_with_graph( engine, linker, PluginGraph::new( Vec::new() ))
 	}
 
-	fn instantiate_with_locks(
+	fn instantiate_with_graph(
 		self,
 		engine: &Engine,
 		linker: &Linker<Ctx>,
-		session_locks: Vec<crate::dispatch_session::SessionLock>,
+		graph: PluginGraph,
 	) -> Result<PluginInstanceSync<Ctx>, wasmtime::Error> {
-		let export_asyncness = component_export_asyncness( &self.component, engine );
+		let export_effects = component_export_effects( &self.component, engine );
 		let mut store = Store::new( engine, self.context );
 		if let Some( fuel ) = self.initial_fuel { store.set_fuel( fuel )?; }
 		if let Some( limiter ) = self.memory_limiter { store.limiter( limiter ); }
@@ -394,8 +393,8 @@ where
 			store,
 			instance,
 			self.interface_remaps,
-			export_asyncness,
-			session_locks,
+			export_effects,
+			graph,
 			self.fuel_limiter,
 			self.epoch_limiter,
 		))
@@ -434,16 +433,22 @@ where
 		engine: &Engine,
 		linker: &Linker<Ctx>,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
-		self.instantiate_async_with_locks( engine, linker, Vec::new() ).await
+		self.instantiate_async_with_graph(
+			engine,
+			linker,
+			PluginGraph::new( Vec::new() ),
+			SchedulerSlot::new(),
+		).await
 	}
 
-	async fn instantiate_async_with_locks(
+	async fn instantiate_async_with_graph(
 		self,
 		engine: &Engine,
 		linker: &Linker<Ctx>,
-		session_locks: Vec<crate::dispatch_session::SessionLock>,
+		graph: PluginGraph,
+		scheduler_slot: Arc<SchedulerSlot<Ctx>>,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
-		let export_asyncness = component_export_asyncness( &self.component, engine );
+		let export_effects = component_export_effects( &self.component, engine );
 		let mut store = Store::new( engine, self.context );
 		if let Some( fuel ) = self.initial_fuel { store.set_fuel( fuel )?; }
 		if let Some( limiter ) = self.memory_limiter { store.limiter( limiter ); }
@@ -452,8 +457,8 @@ where
 			store,
 			instance,
 			self.interface_remaps,
-			export_asyncness,
-			session_locks,
+			export_effects,
+			AsyncInstanceRuntime::new( graph, scheduler_slot ),
 			self.fuel_limiter,
 			self.epoch_limiter,
 		))
@@ -461,7 +466,7 @@ where
 
 }
 
-fn component_export_asyncness( component: &Component, engine: &Engine ) -> ExportAsyncness {
+fn component_export_effects( component: &Component, engine: &Engine ) -> ExportEffects {
 	component.component_type().exports( engine ).filter_map(|( interface, export )| {
 		let wasmtime::component::types::ComponentItem::ComponentInstance( instance ) = export.ty else {
 			return None;

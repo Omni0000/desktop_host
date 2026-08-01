@@ -6,6 +6,7 @@ use wasmtime::component::{ Accessor, Val };
 use crate::{ Binding, Function, FunctionKind, ReturnKind, PluginContext, DispatchError };
 use crate::cardinality::Cardinality ;
 use crate::plugin_instance::{ PluginInstanceAsync, PluginInstanceSync };
+use crate::async_scheduler::{ DispatchContext, AsyncScheduler, ExecutionPathId, PluginKey };
 use super::resource_wrapper::ResourceWrapper ;
 
 
@@ -165,7 +166,9 @@ where
 /// Asynchronously dispatches a non-method function call to all plugins.
 pub(crate) async fn dispatch_all_async<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
-	caller_id: u64,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: &Accessor<Ctx>,
 	target: &DispatchTarget<'_>,
 	data: &[Val],
@@ -180,7 +183,7 @@ where
 {
 	debug_assert_eq!( target.function.kind(), FunctionKind::Freestanding );
 	binding.plugins().map_async(| plugin_id, plugin | async {
-		Val::Result( match dispatch_of_async( caller_id, ctx, plugin_id, plugin, target, data ).await {
+		Val::Result( match dispatch_of_async( DispatchContext::new( scheduler, caller, path ), ctx, plugin_id, plugin, target, data ).await {
 			Ok( val ) => Ok( Some( Box::new( val ))),
 			Err( err ) => Err( Some( Box::new( err.into() ))),
 		})
@@ -190,7 +193,9 @@ where
 /// Asynchronously dispatches a method call to the plugin owning its resource.
 pub(crate) async fn dispatch_method_async<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
-	caller_id: u64,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: &Accessor<Ctx>,
 	target: &DispatchTarget<'_>,
 	data: &[Val],
@@ -205,7 +210,9 @@ where
 	debug_assert_eq!( target.function.kind(), FunctionKind::Method );
 	Val::Result( match route_method_async(
 		binding,
-		caller_id,
+		scheduler,
+		caller,
+		path,
 		ctx,
 		target,
 		data,
@@ -218,7 +225,9 @@ where
 /// Asynchronously implements a synchronous WIT import without blocking its host thread.
 pub(crate) async fn dispatch_all_async_blocking<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
-	caller_id: u64,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: StoreContextMut<'_, Ctx>,
 	target: &DispatchTarget<'_>,
 	data: &[Val],
@@ -234,7 +243,7 @@ where
 	debug_assert_eq!( target.function.kind(), FunctionKind::Freestanding );
 	let ctx = Mutex::new( ctx );
 	binding.plugins().map_async(| plugin_id, plugin | async {
-		Val::Result( match dispatch_of_async_blocking( caller_id, &ctx, plugin_id, plugin, target, data ).await {
+		Val::Result( match dispatch_of_async_blocking( DispatchContext::new( scheduler, caller, path ), &ctx, plugin_id, plugin, target, data ).await {
 			Ok( val ) => Ok( Some( Box::new( val ))),
 			Err( err ) => Err( Some( Box::new( err.into() ))),
 		})
@@ -244,7 +253,9 @@ where
 /// Asynchronously implements a synchronous WIT method import.
 pub(crate) async fn dispatch_method_async_blocking<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
-	caller_id: u64,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: StoreContextMut<'_, Ctx>,
 	target: &DispatchTarget<'_>,
 	data: &[Val],
@@ -260,7 +271,9 @@ where
 	let ctx = Mutex::new( ctx );
 	Val::Result( match route_method_async_blocking(
 		binding,
-		caller_id,
+		scheduler,
+		caller,
+		path,
 		&ctx,
 		target,
 		data,
@@ -271,7 +284,7 @@ where
 }
 
 async fn dispatch_of_async<PluginId, Ctx>(
-	caller_id: u64,
+	dispatch: DispatchContext<'_, Ctx>,
 	ctx: &Accessor<Ctx>,
 	plugin_id: PluginId,
 	plugin: Arc<Mutex<PluginInstanceAsync<Ctx>>>,
@@ -283,8 +296,8 @@ where
 	Ctx: PluginContext,
 {
 	let instance = plugin.lock().await.clone();
-	let result = instance.dispatch_async_from(
-		caller_id,
+	let result = instance.dispatch_async(
+		dispatch,
 		target.package_name,
 		target.interface_name,
 		target.function_name,
@@ -302,7 +315,7 @@ where
 }
 
 async fn dispatch_of_async_blocking<PluginId, Ctx>(
-	caller_id: u64,
+	dispatch: DispatchContext<'_, Ctx>,
 	ctx: &Mutex<StoreContextMut<'_, Ctx>>,
 	plugin_id: PluginId,
 	plugin: Arc<Mutex<PluginInstanceAsync<Ctx>>>,
@@ -314,8 +327,8 @@ where
 	Ctx: PluginContext,
 {
 	let instance = plugin.lock().await.clone();
-	let result = instance.dispatch_async_from(
-		caller_id,
+	let result = instance.dispatch_async(
+		dispatch,
 		target.package_name,
 		target.interface_name,
 		target.function_name,
@@ -334,7 +347,9 @@ where
 
 async fn route_method_async<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
-	caller_id: u64,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: &Accessor<Ctx>,
 	target: &DispatchTarget<'_>,
 	data: &[Val],
@@ -361,12 +376,14 @@ where
 
 	let mut data = Vec::from( data );
 	data[0] = Val::Resource( resource_handle );
-	dispatch_of_async( caller_id, ctx, plugin_id, plugin, target, &data ).await
+	dispatch_of_async( DispatchContext::new( scheduler, caller, path ), ctx, plugin_id, plugin, target, &data ).await
 }
 
 async fn route_method_async_blocking<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
-	caller_id: u64,
+	scheduler: &AsyncScheduler<Ctx>,
+	caller: PluginKey,
+	path: ExecutionPathId,
 	ctx: &Mutex<StoreContextMut<'_, Ctx>>,
 	target: &DispatchTarget<'_>,
 	data: &[Val],
@@ -392,7 +409,7 @@ where
 		.clone();
 	let mut data = Vec::from( data );
 	data[0] = Val::Resource( resource_handle );
-	dispatch_of_async_blocking( caller_id, ctx, plugin_id, plugin, target, &data ).await
+	dispatch_of_async_blocking( DispatchContext::new( scheduler, caller, path ), ctx, plugin_id, plugin, target, &data ).await
 }
 
 fn wrap_resources<T, Id>( val: Val, plugin_id: Id, store: &mut StoreContextMut<T> ) -> Result<Val, DispatchError>

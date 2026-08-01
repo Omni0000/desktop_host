@@ -149,10 +149,14 @@ worker threads and does not require an executor argument. Calls in one dispatch
 may suspend together inside a shared plugin. Independent dispatches whose graphs
 share a plugin are served one at a time; disjoint graphs remain independent.
 
+Ready calls deeper in the graph run first. At the same depth, the destination
+with the oldest eligible call runs next; each destination rotates between
+calling plugins and then between their execution paths so one call-heavy branch
+cannot starve another.
+
 Dropping a dispatch releases its graph so a later session can drive the store.
-Wasmtime does not yet expose host-side cancellation for an already-admitted
-`call_concurrent` task, so that guest task may remain pending until its external
-operation completes.
+Already-admitted Wasmtime calls are cancelled when that store is next driven;
+they are discarded before any calls from the later session are admitted.
 
 ## Plugin Error ABI
 

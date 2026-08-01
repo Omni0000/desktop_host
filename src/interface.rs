@@ -21,8 +21,6 @@ use crate::resource_wrapper::ResourceWrapper ;
 enum LinkError {
 	#[error( "synchronously instantiated plugin exposes async export `{interface}.{function}`" )]
 	SyncInstanceAsyncExport { interface: String, function: String },
-	#[error( "synchronous import `{interface}.{function}` cannot call an async plugin export" )]
-	SyncImportAsyncExport { interface: String, function: String },
 }
 
 /// A single WIT interface within a [`Binding`].
@@ -178,7 +176,7 @@ impl Interface {
 					})
 				})
 			}}
-			macro_rules! link_concurrent {( $dispatch: expr ) => {
+			macro_rules! link_concurrent {( $dispatch: expr ) => {{
 				linker_instance.func_new_concurrent( name, move | ctx, _ty, args, results | {
 					let package_name = package_name.clone();
 					let interface_name = interface_name.clone();
@@ -198,7 +196,7 @@ impl Interface {
 						Ok(())
 					})
 				})
-			}}
+			}}}
 
 			match ( import_is_async, metadata.kind() ) {
 				( true, FunctionKind::Freestanding ) => link_concurrent!( dispatch_all ),
@@ -222,7 +220,7 @@ impl Interface {
 		interface_ident: &str,
 		interface_name: &str,
 		binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
-		caller_id: u64,
+		dispatch: &crate::async_scheduler::LinkDispatchContext<'_, Ctx>,
 		imports: Option<&HashMap<String, bool>>,
 	) -> Result<(), wasmtime::Error>
 	where
@@ -236,55 +234,62 @@ impl Interface {
 		let mut linker_root = linker.root();
 		let mut linker_instance = linker_root.instance( interface_ident )?;
 		let package_name = binding.package_name();
+		let caller = dispatch.caller;
+		let scheduler_slot = dispatch.scheduler_slot;
 
 		self.functions.iter().try_for_each(|( name, metadata )| {
-			let destination_is_async = binding.export_is_async( interface_name, name );
 			let import_is_async = imports.and_then(| functions | functions.get( name )).copied().unwrap_or( false );
-			if destination_is_async && !import_is_async {
-				return Err( LinkError::SyncImportAsyncExport {
-					interface: interface_ident.to_string(),
-					function: name.clone(),
-				}.into() );
-			}
 			let package_name = package_name.to_string();
 			let interface_name = interface_name.to_string();
 			let binding = binding.clone();
 			let function_name = name.clone();
 			let function = metadata.clone();
 
-			macro_rules! link_concurrent {( $dispatch: expr ) => {
+			macro_rules! link_concurrent {( $dispatch: expr ) => {{
+				let caller = caller;
+				let scheduler_slot = Arc::clone( scheduler_slot );
 				linker_instance.func_new_concurrent( name, move | ctx, _ty, args, results | {
 					let package_name = package_name.clone();
 					let interface_name = interface_name.clone();
 					let binding = binding.clone();
 					let function_name = function_name.clone();
 					let function = function.clone();
+					let caller = caller;
+					let scheduler_slot = Arc::clone( &scheduler_slot );
 					Box::pin( async move {
+						let scheduler = scheduler_slot.require()?;
+						let path = scheduler.execution_path( caller );
 						let target = DispatchTarget::new( &package_name, &interface_name, &function_name, &function );
 						results[0] = $dispatch(
-							&binding, caller_id, ctx, &target, args,
+							&binding, &scheduler, caller, path, ctx, &target, args,
 						).await;
 						Ok(())
 					})
 				})
-			}}
+			}}}
 
-			macro_rules! link_blocking {( $dispatch: expr ) => {
+			macro_rules! link_blocking {( $dispatch: expr ) => {{
+				let caller = caller;
+				let scheduler_slot = Arc::clone( scheduler_slot );
 				linker_instance.func_new_async( name, move | ctx, _ty, args, results | {
 					let package_name = package_name.clone();
 					let interface_name = interface_name.clone();
 					let binding = binding.clone();
 					let function_name = function_name.clone();
 					let function = function.clone();
+					let caller = caller;
+					let scheduler_slot = Arc::clone( &scheduler_slot );
 					Box::new( async move {
+						let scheduler = scheduler_slot.require()?;
+						let path = scheduler.execution_path( caller );
 						let target = DispatchTarget::new( &package_name, &interface_name, &function_name, &function );
 						results[0] = $dispatch(
-							&binding, caller_id, ctx, &target, args,
+							&binding, &scheduler, caller, path, ctx, &target, args,
 						).await;
 						Ok(())
 					})
 				})
-			}}
+			}}}
 
 			match ( import_is_async, metadata.kind() ) {
 				( true, FunctionKind::Freestanding ) => link_concurrent!( dispatch_all_async ),

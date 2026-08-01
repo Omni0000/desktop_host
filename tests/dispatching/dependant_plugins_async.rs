@@ -171,7 +171,7 @@ fn async_export_effects_remain_available_after_dispatch() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn sync_import_rejects_the_exact_async_export() -> Result<(), Box<dyn std::error::Error>> {
+fn sync_import_accepts_an_async_export() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
 		let engine = test_engine()?;
 		let plugins = fixtures::plugins( &engine );
@@ -182,13 +182,8 @@ fn sync_import_rejects_the_exact_async_export() -> Result<(), Box<dyn std::error
 			HashMap::from([( bindings.dependency.name, bindings.dependency.spec )]),
 			ExactlyOne( "_".to_string(), child ),
 		);
-		let result = plugins.sync_import.plugin
-			.link_async( &engine, Linker::new( &engine ), vec![ dependency ]).await;
-		let Err( error ) = result else { return Err( ExpectedLinkError.into() )};
-		assert_eq!(
-			error.to_string(),
-			"synchronous import `test:async-child/root.get-value` cannot call an async plugin export",
-		);
+		let _ = plugins.sync_import.plugin
+			.link_async( &engine, Linker::new( &engine ), vec![ dependency ]).await?;
 		Ok(())
 	})
 }
