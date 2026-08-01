@@ -21,6 +21,8 @@ type CallLimiter<Ctx> = Box<dyn FnMut( &mut Store<Ctx>, &str, &str, &Function ) 
 /// or [`Plugin::link`]( crate::Plugin::link ).
 pub struct PluginInstanceSync<Ctx: 'static> {
 	state: PluginState<Ctx>,
+	export_asyncness: ExportAsyncness,
+	session_locks: Arc<Vec<crate::dispatch_session::SessionLock>>,
 }
 
 /// An asynchronously instantiated plugin, ready for asynchronous dispatch.
@@ -37,43 +39,52 @@ impl<Ctx> Clone for PluginInstanceAsync<Ctx> {
 }
 
 enum PluginInstanceAsyncKind<Ctx: 'static> {
-	Async( Arc<PluginInstanceAsyncInner<Ctx>> ),
-	Sync( Arc<Mutex<PluginInstanceSync<Ctx>>> ),
+	Async( Arc<PluginInstanceAsyncInner> ),
+	Sync {
+		state: Arc<Mutex<PluginState<Ctx>>>,
+		interface_remaps: Arc<HashMap<String, Remap>>,
+		export_asyncness: Arc<ExportAsyncness>,
+		session_locks: Arc<Vec<crate::dispatch_session::SessionLock>>,
+	},
 }
 
 impl<Ctx> Clone for PluginInstanceAsyncKind<Ctx> {
 	fn clone( &self ) -> Self {
 		match self {
 			Self::Async( inner ) => Self::Async( Arc::clone( inner )),
-			Self::Sync( instance ) => Self::Sync( Arc::clone( instance )),
+			Self::Sync { state, interface_remaps, export_asyncness, session_locks } => Self::Sync {
+				state: Arc::clone( state ),
+				interface_remaps: Arc::clone( interface_remaps ),
+				export_asyncness: Arc::clone( export_asyncness ),
+				session_locks: Arc::clone( session_locks ),
+			},
 		}
 	}
 }
 
-struct PluginInstanceAsyncInner<Ctx: 'static> {
+struct PluginInstanceAsyncInner {
 	sender: mpsc::UnboundedSender<AsyncRequest>,
-	driver: StdMutex<DriverCoordinator<Ctx>>,
+	driver: StdMutex<DriverState>,
+	interface_remaps: HashMap<String, Remap>,
+	export_asyncness: ExportAsyncness,
+	session_locks: Arc<Vec<crate::dispatch_session::SessionLock>>,
 }
 
-type DriverFuture = BoxFuture<'static, Result<(), String>>;
+pub(crate) type ExportAsyncness = HashMap<String, HashMap<String, bool>>;
+type DriverFuture = BoxFuture<'static, AsyncRuntimeError>;
 
-struct DriverCoordinator<Ctx: 'static> {
-	state: Option<PluginState<Ctx>>,
-	receiver: Option<mpsc::UnboundedReceiver<AsyncRequest>>,
-	future: Option<DriverFuture>,
-	active_session: Option<u64>,
-	waiters: VecDeque<SessionWaiter>,
-	terminal_error: Option<String>,
+pub(crate) trait InstanceMetadata {
+	fn session_locks( &self ) -> &[crate::dispatch_session::SessionLock];
+	fn export_is_async( &self, package_name: &str, interface_name: &str, function_name: &str ) -> bool;
 }
 
-struct SessionWaiter {
-	id: u64,
-	session: Arc<crate::dispatch_session::SessionShared>,
-	requests: Vec<AsyncRequest>,
+enum DriverState {
+	Idle( DriverFuture ),
+	Attached,
+	Failed( AsyncRuntimeError ),
 }
 
 struct AsyncRequest {
-	session: u64,
 	caller: u64,
 	package_name: String,
 	interface_name: String,
@@ -89,6 +100,16 @@ struct PluginState<Ctx: 'static> {
 	interface_remaps: HashMap<String, Remap>,
 	fuel_limiter: Option<CallLimiter<Ctx>>,
 	epoch_limiter: Option<CallLimiter<Ctx>>,
+}
+
+#[derive( Clone, Debug, Error, Eq, PartialEq )]
+enum AsyncRuntimeError {
+	#[error( "async dispatch session unavailable" )] SessionUnavailable,
+	#[error( "plugin dispatch ended without a response" )] MissingResponse,
+	#[error( "plugin dispatch driver stopped" )] DriverStopped,
+	#[error( "plugin call was cancelled before producing a response" )] CallCancelled,
+	#[error( "plugin dispatch request channel closed" )] RequestChannelClosed,
+	#[error( "plugin store failed: {0}" )] StoreFailed( String ),
 }
 
 impl<Ctx: std::fmt::Debug + 'static> std::fmt::Debug for PluginInstanceSync<Ctx> {
@@ -108,7 +129,7 @@ impl<Ctx: 'static> std::fmt::Debug for PluginInstanceAsync<Ctx> {
 		f.debug_struct( "PluginInstanceAsync" )
 			.field( "state", &match &self.kind {
 				PluginInstanceAsyncKind::Async( _ ) => "<session-managed async store>",
-				PluginInstanceAsyncKind::Sync( _ ) => "<session-managed sync store>",
+				PluginInstanceAsyncKind::Sync { .. } => "<session-managed sync store>",
 			})
 			.finish_non_exhaustive()
 	}
@@ -160,16 +181,19 @@ impl<Ctx: PluginContext + 'static> PluginInstanceSync<Ctx> {
 		store: Store<Ctx>,
 		instance: Instance,
 		interface_remaps: HashMap<String, Remap>,
+		export_asyncness: ExportAsyncness,
+		mut session_locks: Vec<crate::dispatch_session::SessionLock>,
 		fuel_limiter: Option<CallLimiter<Ctx>>,
 		epoch_limiter: Option<CallLimiter<Ctx>>,
 	) -> Self {
+		session_locks.push( crate::dispatch_session::new_lock() );
 		Self { state: PluginState {
 			store,
 			instance,
 			interface_remaps,
 			fuel_limiter,
 			epoch_limiter,
-		}}
+		}, export_asyncness, session_locks: Arc::new( crate::dispatch_session::merge_locks( session_locks )) }
 	}
 
 	pub(crate) fn dispatch(
@@ -183,14 +207,6 @@ impl<Ctx: PluginContext + 'static> PluginInstanceSync<Ctx> {
 		self.state.dispatch( package_name, interface_name, function_name, function, data )
 	}
 
-	pub(crate) fn export_is_async(
-		&mut self,
-		package_name: &str,
-		interface_name: &str,
-		function_name: &str,
-	) -> bool {
-		self.state.export_is_async( package_name, interface_name, function_name )
-	}
 }
 
 impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
@@ -198,28 +214,32 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 		store: Store<Ctx>,
 		instance: Instance,
 		interface_remaps: HashMap<String, Remap>,
+		export_asyncness: ExportAsyncness,
+		mut session_locks: Vec<crate::dispatch_session::SessionLock>,
 		fuel_limiter: Option<CallLimiter<Ctx>>,
 		epoch_limiter: Option<CallLimiter<Ctx>>,
 	) -> Self {
+		session_locks.push( crate::dispatch_session::new_lock() );
+		let session_locks = Arc::new( crate::dispatch_session::merge_locks( session_locks ));
+		let exported_interface_remaps = interface_remaps.clone();
+		let mut state = PluginState {
+			store,
+			instance,
+			interface_remaps,
+			fuel_limiter,
+			epoch_limiter,
+		};
 		Self {
 			kind: PluginInstanceAsyncKind::Async({
 				let ( sender, receiver ) = mpsc::unbounded();
 				Arc::new( PluginInstanceAsyncInner {
 					sender,
-					driver: StdMutex::new( DriverCoordinator {
-						state: Some( PluginState {
-							store,
-							instance,
-							interface_remaps,
-							fuel_limiter,
-							epoch_limiter,
-						}),
-						receiver: Some( receiver ),
-						future: None,
-						active_session: None,
-						waiters: VecDeque::new(),
-						terminal_error: None,
-					}),
+					interface_remaps: exported_interface_remaps,
+					export_asyncness,
+					session_locks,
+					driver: StdMutex::new( DriverState::Idle( Box::pin( async move {
+						state.run_requests( receiver ).await
+					}))),
 				})
 			}),
 		}
@@ -246,8 +266,8 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 		data: &[Val],
 	) -> Result<Val, DispatchError> {
 		ensure_supported_values( data )?;
-		if let PluginInstanceAsyncKind::Sync( instance ) = &self.kind {
-			return instance.lock().await.dispatch(
+		if let PluginInstanceAsyncKind::Sync { state, .. } = &self.kind {
+			return state.lock().await.dispatch(
 				package_name,
 				interface_name,
 				function_name,
@@ -256,10 +276,9 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 			);
 		}
 		let session = crate::dispatch_session::current()
-			.ok_or_else(|| runtime_error( "async dispatch session unavailable" ))?;
+			.ok_or_else(|| runtime_error( AsyncRuntimeError::SessionUnavailable ))?;
 		let ( response, result ) = oneshot::channel();
 		let request = AsyncRequest {
-			session: session.id(),
 			caller,
 			package_name: package_name.to_string(),
 			interface_name: interface_name.to_string(),
@@ -270,31 +289,8 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 		};
 
 		let PluginInstanceAsyncKind::Async( inner ) = &self.kind else { unreachable!() };
-		inner.enqueue( session, request )?;
-		result.await.map_err(| _ |
-			DispatchError::RuntimeException( wasmtime::Error::msg( "plugin dispatch ended without a response" ))
-		)?
-	}
-
-	pub(crate) fn export_is_async(
-		&self,
-		package_name: &str,
-		interface_name: &str,
-		function_name: &str,
-	) -> Result<bool, wasmtime::Error> {
-		match &self.kind {
-			PluginInstanceAsyncKind::Async( inner ) => match inner.driver.lock() {
-				Ok( mut driver ) => Ok( driver.state.as_mut()
-					.ok_or_else(|| wasmtime::Error::msg( "plugin is busy during link-time export inspection" ))?
-					.export_is_async( package_name, interface_name, function_name )),
-				Err( poisoned ) => Ok( poisoned.into_inner().state.as_mut()
-					.ok_or_else(|| wasmtime::Error::msg( "plugin is busy during link-time export inspection" ))?
-					.export_is_async( package_name, interface_name, function_name )),
-			},
-			PluginInstanceAsyncKind::Sync( instance ) => Ok( instance.try_lock()
-				.ok_or_else(|| wasmtime::Error::msg( "plugin is busy during link-time export inspection" ))?
-				.state.export_is_async( package_name, interface_name, function_name )),
-		}
+		inner.enqueue( &session, request )?;
+		result.await.map_err(| _ | runtime_error( AsyncRuntimeError::MissingResponse ))?
 	}
 
 }
@@ -303,130 +299,103 @@ impl<Ctx: PluginContext + 'static> From<PluginInstanceSync<Ctx>> for PluginInsta
 	/// Makes a synchronous instance usable in an async binding without changing
 	/// how its Wasmtime store was instantiated.
 	fn from( instance: PluginInstanceSync<Ctx> ) -> Self {
-		Self { kind: PluginInstanceAsyncKind::Sync( Arc::new( Mutex::new( instance ))) }
+		let PluginInstanceSync { state, export_asyncness, session_locks } = instance;
+		let interface_remaps = Arc::new( state.interface_remaps.clone() );
+		Self { kind: PluginInstanceAsyncKind::Sync {
+			state: Arc::new( Mutex::new( state )),
+			interface_remaps,
+			export_asyncness: Arc::new( export_asyncness ),
+			session_locks,
+		}}
 	}
 }
 
-impl<Ctx: PluginContext + 'static> PluginInstanceAsyncInner<Ctx> {
+impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceSync<Ctx> {
+	fn session_locks( &self ) -> &[crate::dispatch_session::SessionLock] { &self.session_locks }
+
+	fn export_is_async( &self, package_name: &str, interface_name: &str, function_name: &str ) -> bool {
+		export_is_async(
+			&self.export_asyncness,
+			&self.state.interface_remaps,
+			package_name,
+			interface_name,
+			function_name,
+		)
+	}
+}
+
+impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceAsync<Ctx> {
+	fn session_locks( &self ) -> &[crate::dispatch_session::SessionLock] {
+		match &self.kind {
+			PluginInstanceAsyncKind::Async( inner ) => &inner.session_locks,
+			PluginInstanceAsyncKind::Sync { session_locks, .. } => session_locks,
+		}
+	}
+
+	fn export_is_async( &self, package_name: &str, interface_name: &str, function_name: &str ) -> bool {
+		match &self.kind {
+			PluginInstanceAsyncKind::Async( inner ) => export_is_async(
+				&inner.export_asyncness,
+				&inner.interface_remaps,
+				package_name,
+				interface_name,
+				function_name,
+			),
+			PluginInstanceAsyncKind::Sync { interface_remaps, export_asyncness, .. } => export_is_async(
+				export_asyncness,
+				interface_remaps,
+				package_name,
+				interface_name,
+				function_name,
+			),
+		}
+	}
+}
+
+impl PluginInstanceAsyncInner {
 	fn enqueue(
 		self: &Arc<Self>,
-		session: Arc<crate::dispatch_session::SessionShared>,
+		session: &Arc<crate::dispatch_session::SessionShared>,
 		request: AsyncRequest,
 	) -> Result<(), DispatchError> {
-		let session_id = session.id();
-		let mut driver = match self.driver.lock() {
-			Ok( driver ) => driver,
-			Err( poisoned ) => poisoned.into_inner(),
-		};
-		if let Some( error ) = &driver.terminal_error {
-			return Err( runtime_error( error ));
-		}
-
-		match driver.active_session {
-			Some( active ) if active == session_id => {
-				return self.sender.unbounded_send( request )
-					.map_err(| _ | runtime_error( "plugin dispatch driver stopped" ));
+		let mut driver = self.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
+		let future = match std::mem::replace( &mut *driver, DriverState::Attached ) {
+			DriverState::Idle( future ) => Some( future ),
+			DriverState::Attached => None,
+			DriverState::Failed( error ) => {
+				*driver = DriverState::Failed( error.clone() );
+				return Err( runtime_error( error ));
 			}
-			Some( _ ) => {
-				match driver.waiters.iter_mut().find(| waiter | waiter.id == session_id ) {
-					Some( waiter ) => waiter.requests.push( request ),
-					None => driver.waiters.push_back( SessionWaiter {
-						id: session_id,
-						session,
-						requests: vec![ request ],
-					}),
-				}
-				return Ok(());
-			}
-			None => {}
-		}
-
-		let future = if let Some( future ) = driver.future.take() {
-			future
-		} else {
-				let mut state = driver.state.take()
-					.ok_or_else(|| runtime_error( "plugin dispatch state unavailable" ))?;
-				let receiver = driver.receiver.take()
-					.ok_or_else(|| runtime_error( "plugin dispatch receiver unavailable" ))?;
-				Box::pin( async move { state.run_requests( receiver ).await })
 		};
-		driver.active_session = Some( session_id );
-		self.sender.unbounded_send( request )
-			.map_err(| _ | runtime_error( "plugin dispatch driver stopped" ))?;
+		if self.sender.unbounded_send( request ).is_err() {
+			*driver = DriverState::Failed( AsyncRuntimeError::DriverStopped );
+			return Err( runtime_error( AsyncRuntimeError::DriverStopped ));
+		}
 		drop( driver );
-		session.spawn( Box::pin( AttachedDriver {
-			inner: Arc::clone( self ),
-			session_id,
-			future: Some( future ),
-			completed: false,
-		}));
+		if let Some( future ) = future {
+				session.spawn( Box::pin( AttachedDriver {
+					inner: Arc::clone( self ),
+					future: Some( future ),
+				}));
+		}
 		Ok(())
 	}
 
-	fn release( self: &Arc<Self>, session_id: u64, future: DriverFuture ) {
-		let mut driver = match self.driver.lock() {
-			Ok( driver ) => driver,
-			Err( poisoned ) => poisoned.into_inner(),
-		};
-		if driver.active_session != Some( session_id ) {
-			driver.future = Some( future );
-			return;
-		}
-
-		let waiter = loop {
-			match driver.waiters.pop_front() {
-				Some( waiter ) if waiter.session.is_cancelled() => {
-					for request in waiter.requests {
-						let _ = request.response.send( Err( runtime_error( "dispatch session was cancelled" )));
-					}
-				}
-				Some( waiter ) => break waiter,
-				None => {
-					driver.active_session = None;
-					driver.future = Some( future );
-					return;
-				}
-			}
-		};
-		driver.active_session = Some( waiter.id );
-		for request in waiter.requests {
-			if let Err( error ) = self.sender.unbounded_send( request ) {
-				let _ = error.into_inner().response.send( Err( runtime_error( "plugin dispatch driver stopped" )));
-			}
-		}
-		drop( driver );
-		waiter.session.spawn( Box::pin( AttachedDriver {
-			inner: Arc::clone( self ),
-			session_id: waiter.id,
-			future: Some( future ),
-			completed: false,
-		}));
+	fn release( &self, future: DriverFuture ) {
+		*self.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner ) = DriverState::Idle( future );
 	}
 
-	fn fail( &self, session_id: u64, error: &str ) {
-		let mut driver = match self.driver.lock() {
-			Ok( driver ) => driver,
-			Err( poisoned ) => poisoned.into_inner(),
-		};
-		if driver.active_session != Some( session_id ) { return; }
-		driver.active_session = None;
-		driver.terminal_error = Some( error.to_string() );
-		for waiter in driver.waiters.drain( .. ) {
-			for request in waiter.requests {
-				let _ = request.response.send( Err( runtime_error( error )));
-			}
-		}
+	fn fail( &self, error: AsyncRuntimeError ) {
+		*self.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner ) = DriverState::Failed( error );
 	}
 }
 
-struct AttachedDriver<Ctx: PluginContext + 'static> {
-	inner: Arc<PluginInstanceAsyncInner<Ctx>>,
-	session_id: u64,
+struct AttachedDriver {
+	inner: Arc<PluginInstanceAsyncInner>,
 	future: Option<DriverFuture>,
-	completed: bool,
 }
 
-impl<Ctx: PluginContext + 'static> Future for AttachedDriver<Ctx> {
+impl Future for AttachedDriver {
 	type Output = ();
 
 	fn poll( mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_> ) -> std::task::Poll<()> {
@@ -436,22 +405,18 @@ impl<Ctx: PluginContext + 'static> Future for AttachedDriver<Ctx> {
 		};
 		match result {
 			std::task::Poll::Pending => std::task::Poll::Pending,
-			std::task::Poll::Ready( result ) => {
+			std::task::Poll::Ready( error ) => {
 				self.future.take();
-				self.completed = true;
-				let error = result.err().unwrap_or_else(|| "plugin dispatch driver stopped".to_string());
-				self.inner.fail( self.session_id, &error );
+				self.inner.fail( error );
 				std::task::Poll::Ready(())
 			}
 		}
 	}
 }
 
-impl<Ctx: PluginContext> Drop for AttachedDriver<Ctx> {
+impl Drop for AttachedDriver {
 	fn drop( &mut self ) {
-		if !self.completed {
-			if let Some( future ) = self.future.take() { self.inner.release( self.session_id, future ); }
-		}
+		if let Some( future ) = self.future.take() { self.inner.release( future ); }
 	}
 }
 
@@ -491,7 +456,7 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 		Self::finish_call( function, buffer, call_result )
 	}
 
-	async fn run_requests( &mut self, mut receiver: mpsc::UnboundedReceiver<AsyncRequest> ) -> Result<(), String> {
+	async fn run_requests( &mut self, mut receiver: mpsc::UnboundedReceiver<AsyncRequest> ) -> AsyncRuntimeError {
 		if self.fuel_limiter.is_some() || self.epoch_limiter.is_some() {
 			while let Some( request ) = receiver.next().await {
 				let result = self.dispatch_async(
@@ -503,31 +468,19 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 				).await;
 				let _ = request.response.send( result );
 			}
-			return Err( "plugin dispatch request channel closed".to_string() );
+			return AsyncRuntimeError::RequestChannelClosed;
 		}
 
 		let instance = self.instance;
 		let interface_remaps = &self.interface_remaps;
 		let run_result = self.store.run_concurrent( async | accessor | {
 			let mut queues = RequestQueues::default();
-			let mut deferred = VecDeque::new();
 			let mut calls = FuturesUnordered::<BoxFuture<'_, ()>>::new();
-			let mut active_session = None;
 			loop {
 				if calls.is_empty() {
-					let request = match deferred.pop_front() {
-						Some( request ) => request,
-						None => match receiver.next().await {
-							Some( request ) => request,
-							None => return,
-						},
-					};
-					active_session = Some( request.session );
+					let Some( request ) = receiver.next().await else { return };
 					queues.push( request );
-					while let Ok( request ) = receiver.try_recv() {
-						if Some( request.session ) == active_session { queues.push( request ); }
-						else { deferred.push_back( request ); }
-					}
+					while let Ok( request ) = receiver.try_recv() { queues.push( request ); }
 					while let Some( request ) = queues.pop() {
 						start_concurrent_call( accessor, instance, interface_remaps, request, &mut calls );
 					}
@@ -540,12 +493,8 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 				futures::select_biased! {
 					request = request => match request {
 						Some( request ) => {
-							if Some( request.session ) == active_session { queues.push( request ); }
-							else { deferred.push_back( request ); }
-							while let Ok( request ) = receiver.try_recv() {
-								if Some( request.session ) == active_session { queues.push( request ); }
-								else { deferred.push_back( request ); }
-							}
+							queues.push( request );
+							while let Ok( request ) = receiver.try_recv() { queues.push( request ); }
 							while let Some( request ) = queues.pop() {
 								start_concurrent_call( accessor, instance, interface_remaps, request, &mut calls );
 							}
@@ -558,13 +507,12 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 		}).await;
 
 		if let Err( error ) = run_result {
-			let message = error.to_string();
 			while let Ok( request ) = receiver.try_recv() {
-				let _ = request.response.send( Err( runtime_error( &message )));
+				let _ = request.response.send( Err( runtime_error( AsyncRuntimeError::StoreFailed( error.to_string() ))));
 			}
-			return Err( message );
+			return AsyncRuntimeError::StoreFailed( error.to_string() );
 		}
-		Err( "plugin dispatch driver stopped".to_string() )
+		AsyncRuntimeError::DriverStopped
 	}
 
 	fn prepare_call(
@@ -618,35 +566,7 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 	}
 
 	fn resolve_export( &self, package_name: &str, interface_name: &str, function_name: &str ) -> (String, String) {
-		match self.interface_remaps.get( interface_name ) {
-			Some( remap ) => (
-				format!( "{}/{}", package_name, remap.interface_name( interface_name )),
-				remap.item_name( function_name ).to_string(),
-			),
-			None => (
-				format!( "{}/{}", package_name, interface_name ),
-				function_name.to_string(),
-			),
-		}
-	}
-
-	fn export_is_async(
-		&mut self,
-		package_name: &str,
-		interface_name: &str,
-		function_name: &str,
-	) -> bool {
-		let ( interface_path, function_name ) = self.resolve_export( package_name, interface_name, function_name );
-		let Some( interface_index ) = self.instance.get_export_index( &mut self.store, None, &interface_path ) else {
-			return false;
-		};
-		let Some( function_index ) = self.instance.get_export_index( &mut self.store, Some( &interface_index ), &function_name ) else {
-			return false;
-		};
-		let Some( function ) = self.instance.get_func( &mut self.store, function_index ) else {
-			return false;
-		};
-		function.ty( &self.store ).async_()
+		resolve_export( &self.interface_remaps, package_name, interface_name, function_name )
 	}
 
 }
@@ -743,12 +663,12 @@ impl ResponseGuard {
 
 impl Drop for ResponseGuard {
 	fn drop( &mut self ) {
-		self.send( Err( runtime_error( "plugin call was cancelled before producing a response" )));
+		self.send( Err( runtime_error( AsyncRuntimeError::CallCancelled )));
 	}
 }
 
-fn runtime_error( message: &str ) -> DispatchError {
-	DispatchError::RuntimeException( wasmtime::Error::msg( message.to_string() ))
+fn runtime_error( error: AsyncRuntimeError ) -> DispatchError {
+	DispatchError::RuntimeException( error.into() )
 }
 
 fn resolve_export(
@@ -764,6 +684,25 @@ fn resolve_export(
 		),
 		None => ( format!( "{package_name}/{interface_name}" ), function_name.to_string() ),
 	}
+}
+
+fn export_is_async(
+	export_asyncness: &ExportAsyncness,
+	interface_remaps: &HashMap<String, Remap>,
+	package_name: &str,
+	interface_name: &str,
+	function_name: &str,
+) -> bool {
+	let ( interface_path, function_name ) = resolve_export(
+		interface_remaps,
+		package_name,
+		interface_name,
+		function_name,
+	);
+	export_asyncness.get( &interface_path )
+		.and_then(| functions | functions.get( &function_name ))
+		.copied()
+		.unwrap_or( false )
 }
 
 fn ensure_supported_values( values: &[Val] ) -> Result<(), DispatchError> {

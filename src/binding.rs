@@ -11,9 +11,14 @@ use wasmtime::component::{ Linker, Val };
 
 use crate::{ Interface, PluginContext };
 use crate::cardinality::{ Any, AtLeastOne, AtMostOne, Cardinality, ExactlyOne };
-use crate::plugin_instance::{ PluginInstanceAsync, PluginInstanceSync };
+use crate::plugin_instance::{ InstanceMetadata, PluginInstanceAsync, PluginInstanceSync };
 
-pub(crate) type ImportAsyncness = HashMap<String, HashMap<String, bool>>;
+pub(crate) type ImportAsyncness = HashMap<String, ImportMetadata>;
+
+pub(crate) struct ImportMetadata {
+	pub(crate) linker_name: String,
+	pub(crate) functions: HashMap<String, bool>,
+}
 
 
 
@@ -40,6 +45,8 @@ where
 	package_name: String,
 	interfaces: HashMap<String, Interface>,
 	plugins: PluginSockets<PluginId, Plugins, Instance>,
+	export_asyncness: HashMap<String, HashMap<String, bool>>,
+	session_locks: Vec<crate::dispatch_session::SessionLock>,
 }
 
 /// An abstract contract specifying what plugins must implement (via plugs) or what
@@ -131,11 +138,12 @@ where
 	}
 }
 
+#[allow( private_bounds )]
 impl<PluginId, Ctx, Plugins, Instance> Binding<PluginId, Ctx, Plugins, Instance>
 where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
 	Ctx: PluginContext + 'static,
-	Instance: Send + 'static,
+	Instance: InstanceMetadata + Send + 'static,
 	Plugins: Cardinality<PluginId, Instance> + 'static,
 	PluginSockets<PluginId, Plugins, Instance>: Cardinality<PluginId, Arc<Mutex<Instance>>> + Send + Sync,
 {
@@ -144,17 +152,42 @@ where
 	pub fn new(
 		package_name: impl Into<String>,
 		interfaces: HashMap<String, Interface>,
-		plugins: Plugins
+		plugins: Plugins,
 	) -> Self {
+		let package_name = package_name.into();
+		let mut locks = Vec::new();
+		let mut export_asyncness = HashMap::<String, HashMap<String, bool>>::new();
+		let _ = plugins.map(| _, plugin | {
+			locks.extend_from_slice( plugin.session_locks() );
+			for ( interface_name, interface ) in &interfaces {
+				for function_name in interface.function_names() {
+					if plugin.export_is_async( &package_name, interface_name, function_name ) {
+						export_asyncness.entry( interface_name.clone() ).or_default()
+							.insert( function_name.to_string(), true );
+					}
+				}
+			}
+		});
 		Self( Arc::new( BindingData {
-			package_name: package_name.into(),
+			package_name,
 			interfaces,
 			plugins: plugins.map_mut(| plugin | Arc::new( Mutex::new( plugin ))),
+			export_asyncness,
+			session_locks: crate::dispatch_session::merge_locks( locks ),
 		}), std::marker::PhantomData )
 	}
 
 	pub(crate) fn plugins( &self ) -> &PluginSockets<PluginId, Plugins, Instance> {
 		&self.0.plugins
+	}
+
+	pub(crate) fn package_name( &self ) -> &str { &self.0.package_name }
+
+	pub(crate) fn export_is_async( &self, interface_name: &str, function_name: &str ) -> bool {
+		self.0.export_asyncness.get( interface_name )
+			.and_then(| functions | functions.get( function_name ))
+			.copied()
+			.unwrap_or( false )
 	}
 }
 
@@ -173,7 +206,7 @@ where
 	{
 		binding.0.interfaces.iter().try_for_each(|( name, interface )| {
 			let interface_ident = format!( "{}/{}", binding.0.package_name, name );
-			interface.add_to_linker( linker, &binding.0.package_name, &interface_ident, name, binding )
+			interface.add_to_linker( linker, &interface_ident, name, binding )
 		})
 	}
 
@@ -184,20 +217,16 @@ where
 	{
 		binding.0.interfaces.iter().try_for_each(|( name, interface )| {
 			let interface_ident = format!( "{}/{}", binding.0.package_name, name );
-			interface.add_to_linker_async_sync( linker, &binding.0.package_name, &interface_ident, name, binding, imports.get( &interface_ident ))
+			let import = imports.get( &interface_ident );
+			let linker_name = import.map_or( interface_ident.as_str(), | import | import.linker_name.as_str() );
+			interface.add_to_linker_async_sync(
+				linker,
+				linker_name,
+				name,
+				binding,
+				import.map(| import | &import.functions ),
+			)
 		})
-	}
-
-	pub(crate) fn sync_export_is_async(
-		binding: &Binding<PluginId, Ctx, Plugins>,
-		package_name: &str,
-		interface_name: &str,
-		function_name: &str,
-	) -> Result<bool, wasmtime::Error> {
-		binding.0.plugins.try_any(| _, plugin | Ok( plugin.try_lock()
-			.ok_or_else(|| wasmtime::Error::msg( "plugin is busy during link-time export inspection" ))?
-			.export_is_async( package_name, interface_name, function_name )
-		))
 	}
 
 	/// Dispatches a function call to all plugins implementing this binding.
@@ -260,20 +289,17 @@ where
 	{
 		binding.0.interfaces.iter().try_for_each(|( name, interface )| {
 			let interface_ident = format!( "{}/{}", binding.0.package_name, name );
-			interface.add_to_linker_async( linker, &binding.0.package_name, &interface_ident, name, binding, caller_id, imports.get( &interface_ident ))
+			let import = imports.get( &interface_ident );
+			let linker_name = import.map_or( interface_ident.as_str(), | import | import.linker_name.as_str() );
+			interface.add_to_linker_async(
+				linker,
+				linker_name,
+				name,
+				binding,
+				caller_id,
+				import.map(| import | &import.functions ),
+			)
 		})
-	}
-
-	pub(crate) fn export_is_async(
-		binding: &Self,
-		package_name: &str,
-		interface_name: &str,
-		function_name: &str,
-	) -> Result<bool, wasmtime::Error> {
-		binding.0.plugins.try_any(| _, plugin | plugin.try_lock()
-			.ok_or_else(|| wasmtime::Error::msg( "plugin is busy during link-time export inspection" ))?
-			.export_is_async( package_name, interface_name, function_name )
-		)
 	}
 
 	/// Asynchronously dispatches a function call to all plugins implementing this binding.
@@ -312,14 +338,14 @@ where
 	/// # 	))]),
 	/// # 	ExactlyOne( "plugin".to_string(), plugin ),
 	/// # );
-	/// let result = binding.dispatch_async( "root", "get", &[] ).await?;
+	/// let result = binding.dispatch( "root", "get", &[] ).await?;
 	/// assert!( matches!( result, ExactlyOne( _, Ok( Val::U32( 42 )))));
 	/// # Ok(()) }) }
 	/// ```
 	///
 	/// # Errors
 	/// Returns an error if the interface or function is not found in this binding.
-	pub async fn dispatch_async(
+	pub async fn dispatch(
 		&self,
 		interface_name: &str,
 		function_name: &str,
@@ -333,7 +359,7 @@ where
 		let interface_name = interface_name.to_string();
 		let function_name = function_name.to_string();
 		let args = args.to_vec();
-		crate::dispatch_session::run( async move {
+		crate::dispatch_session::run( self.0.session_locks.clone(), async move {
 			binding.dispatch_in_session( &interface_name, &function_name, &args ).await
 		}).await
 	}
@@ -399,6 +425,22 @@ where
 	Any( Binding<PluginId, Ctx, Any<PluginId, Instance>, Instance> ),
 }
 
+impl<PluginId, Ctx, Instance> BindingAny<PluginId, Ctx, Instance>
+where
+	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+	Ctx: PluginContext + 'static,
+	Instance: Send + 'static,
+{
+	pub(crate) fn session_locks( &self ) -> Vec<crate::dispatch_session::SessionLock> {
+		match self {
+			Self::ExactlyOne( binding ) => binding.0.session_locks.clone(),
+			Self::AtMostOne( binding ) => binding.0.session_locks.clone(),
+			Self::AtLeastOne( binding ) => binding.0.session_locks.clone(),
+			Self::Any( binding ) => binding.0.session_locks.clone(),
+		}
+	}
+}
+
 impl<PluginId, Ctx> BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>>
 where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
@@ -445,6 +487,13 @@ where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
 	Ctx: PluginContext + 'static,
 {
+	pub(crate) fn session_locks( &self ) -> Vec<crate::dispatch_session::SessionLock> {
+		match self {
+			Self::Sync( binding ) => binding.session_locks(),
+			Self::Async( binding ) => binding.session_locks(),
+		}
+	}
+
 	pub(crate) fn add_to_linker( &self, linker: &mut Linker<Ctx>, caller_id: u64, imports: &ImportAsyncness ) -> Result<(), wasmtime::Error> {
 		match self {
 			Self::Sync( binding ) => binding.add_to_linker_async( linker, imports ),

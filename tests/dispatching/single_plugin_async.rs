@@ -25,7 +25,7 @@ fn instantiates_and_dispatches_wit_async_plugin() {
 			ExactlyOne( "_".to_string(), instance ),
 		);
 
-		match binding.dispatch_async( "root", "get-value", &[] ).await {
+		match binding.dispatch( "root", "get-value", &[] ).await {
 			Ok( ExactlyOne( _, Ok( Val::U32( 42 )))) => {}
 			value => panic!( "Expected async dispatch to return U32(42), found: {:#?}", value ),
 		}

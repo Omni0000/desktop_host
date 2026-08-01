@@ -15,7 +15,6 @@ fn async_requests_are_fifo_per_caller_and_round_robin_between_callers() {
 	fn request( caller: u64, name: &str ) -> AsyncRequest {
 		let ( response, _ ) = futures::channel::oneshot::channel();
 		AsyncRequest {
-			session: 1,
 			caller,
 			package_name: String::new(),
 			interface_name: String::new(),
@@ -37,13 +36,13 @@ fn async_requests_are_fifo_per_caller_and_round_robin_between_callers() {
 }
 
 #[test]
-fn cancelled_admitted_calls_report_a_runtime_error() {
+fn dropped_response_guard_reports_the_cancellation_error() {
 	let ( response, result ) = futures::channel::oneshot::channel();
 	drop( super::ResponseGuard::new( response ));
-	assert!( matches!(
-		futures::executor::block_on( result ),
-		Ok( Err( DispatchError::RuntimeException( _ )))
-	));
+	let Ok( Err( DispatchError::RuntimeException( error ))) = futures::executor::block_on( result ) else {
+		panic!( "dropping the response guard did not return a runtime exception" );
+	};
+	assert_eq!( error.downcast_ref(), Some( &super::AsyncRuntimeError::CallCancelled ));
 }
 
 #[test]

@@ -33,7 +33,7 @@ fn native_async_resource_calls_route_to_the_owning_plugin() -> Result<(), Box<dy
 			ExactlyOne( "consumer".to_string(), consumer ),
 		);
 
-		let result = root.dispatch_async( "root", "get-value", &[] ).await?;
+		let result = root.dispatch( "root", "get-value", &[] ).await?;
 		assert!( matches!( result, ExactlyOne( _, Ok( Val::U32( 42 )))));
 		Ok(())
 	})

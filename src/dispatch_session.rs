@@ -2,24 +2,41 @@ use std::cell::RefCell ;
 use std::future::Future ;
 use std::pin::Pin ;
 use std::sync::{ Arc, Mutex as StdMutex };
-use std::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
+use std::sync::atomic::{ AtomicU64, Ordering };
 use std::task::{ Context, Poll };
 
-use futures::channel::oneshot ;
 use futures::future::BoxFuture ;
+use futures::lock::Mutex ;
 use futures::stream::{ FuturesUnordered, Stream };
 use futures::task::AtomicWaker ;
 
 
-static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new( 1 );
+static NEXT_LOCK_ID: AtomicU64 = AtomicU64::new( 1 );
+
+#[derive( Clone, Debug )]
+pub(crate) struct SessionLock {
+	id: u64,
+	mutex: Arc<Mutex<()>>,
+}
+
+pub(crate) fn new_lock() -> SessionLock {
+	SessionLock {
+		id: NEXT_LOCK_ID.fetch_add( 1, Ordering::Relaxed ),
+		mutex: Arc::new( Mutex::new(()) ),
+	}
+}
+
+pub(crate) fn merge_locks( mut locks: Vec<SessionLock> ) -> Vec<SessionLock> {
+	locks.sort_unstable_by_key(| lock | lock.id );
+	locks.dedup_by_key(| lock | lock.id );
+	locks
+}
 
 thread_local! {
 	static CURRENT_SESSION: RefCell<Option<Arc<SessionShared>>> = const { RefCell::new( None ) };
 }
 
 pub(crate) struct SessionShared {
-	id: u64,
-	cancelled: AtomicBool,
 	pending: StdMutex<Vec<BoxFuture<'static, ()>>>,
 	waker: AtomicWaker,
 }
@@ -27,15 +44,10 @@ pub(crate) struct SessionShared {
 impl SessionShared {
 	fn new() -> Arc<Self> {
 		Arc::new( Self {
-			id: NEXT_SESSION_ID.fetch_add( 1, Ordering::Relaxed ),
-			cancelled: AtomicBool::new( false ),
 			pending: StdMutex::new( Vec::new() ),
 			waker: AtomicWaker::new(),
 		})
 	}
-
-	pub(crate) fn id( &self ) -> u64 { self.id }
-	pub(crate) fn is_cancelled( &self ) -> bool { self.cancelled.load( Ordering::Acquire ) }
 
 	pub(crate) fn spawn( &self, task: BoxFuture<'static, ()> ) {
 		match self.pending.lock() {
@@ -73,37 +85,33 @@ impl Drop for CurrentSessionGuard {
 	}
 }
 
-pub(crate) async fn run<R, F>( future: F ) -> R
+pub(crate) async fn run<R, F>( locks: Vec<SessionLock>, future: F ) -> R
 where
 	R: Send + 'static,
 	F: Future<Output = R> + Send + 'static,
 {
+	let mut guards = Vec::with_capacity( locks.len() );
+	for lock in locks {
+		guards.push( lock.mutex.lock_owned().await );
+	}
 	let shared = SessionShared::new();
-	let ( response, result ) = oneshot::channel();
-	shared.spawn( Box::pin( async move {
-		let _ = response.send( future.await );
-	}));
-	SessionFuture {
+	let result = SessionFuture {
 		shared,
 		tasks: FuturesUnordered::new(),
-		result,
-	}.await
+		root: Box::pin( future ),
+	}.await;
+	drop( guards );
+	result
 }
 
-struct SessionFuture<R> {
+struct SessionFuture<F> {
 	shared: Arc<SessionShared>,
 	tasks: FuturesUnordered<BoxFuture<'static, ()>>,
-	result: oneshot::Receiver<R>,
+	root: Pin<Box<F>>,
 }
 
-impl<R> Drop for SessionFuture<R> {
-	fn drop( &mut self ) {
-		self.shared.cancelled.store( true, Ordering::Release );
-	}
-}
-
-impl<R> Future for SessionFuture<R> {
-	type Output = R;
+impl<F: Future> Future for SessionFuture<F> {
+	type Output = F::Output;
 
 	fn poll( mut self: Pin<&mut Self>, cx: &mut Context<'_> ) -> Poll<Self::Output> {
 		self.shared.waker.register( cx.waker() );
@@ -112,19 +120,12 @@ impl<R> Future for SessionFuture<R> {
 
 		let _session = CurrentSessionGuard::enter( &self.shared );
 
-		let result = match Pin::new( &mut self.result ).poll( cx ) {
-			Poll::Ready( Ok( result )) => Poll::Ready( result ),
-			Poll::Ready( Err( _ )) => panic!( "dispatch session root task ended without a response" ),
+		match self.root.as_mut().poll( cx ) {
+			Poll::Ready( result ) => Poll::Ready( result ),
 			Poll::Pending => {
 				while let Poll::Ready( Some(())) = Pin::new( &mut self.tasks ).poll_next( cx ) {}
-				match Pin::new( &mut self.result ).poll( cx ) {
-					Poll::Ready( Ok( result )) => Poll::Ready( result ),
-					Poll::Ready( Err( _ )) => panic!( "dispatch session root task ended without a response" ),
-					Poll::Pending => Poll::Pending,
-				}
+				self.root.as_mut().poll( cx )
 			}
-		};
-
-		result
+		}
 	}
 }

@@ -69,7 +69,7 @@ fn dispatch_async_test_dependant_plugins_expect_primitive() {
 			ExactlyOne( "_".to_string(), startup_instance ),
 		);
 
-		match root_binding.dispatch_async( "root", "get-primitive", &[] ).await {
+		match root_binding.dispatch( "root", "get-primitive", &[] ).await {
 			Ok( ExactlyOne( _, Ok( Val::U32( 42 )))) => {}
 			value => panic!( "Expected Ok( ExactlyOne( Ok( U32( 42 )))), found: {:#?}", value ),
 		}

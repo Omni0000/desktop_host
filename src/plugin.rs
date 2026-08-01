@@ -11,7 +11,8 @@ use wasmtime::{ Engine, Store };
 use wasmtime::component::{ Component, ResourceTable, Linker, Val };
 
 use crate::{ BindingAny, BindingAnyAsync };
-use crate::plugin_instance::{ PluginInstanceAsync, PluginInstanceSync };
+use crate::binding::ImportMetadata ;
+use crate::plugin_instance::{ ExportAsyncness, PluginInstanceAsync, PluginInstanceSync };
 use crate::Function ;
 use crate::Remap ;
 
@@ -295,10 +296,10 @@ where
 		Sockets: IntoIterator,
 		Sockets::Item: Into<BindingAny<PluginId, Ctx>>,
 	{
-		sockets.into_iter()
-			.map( Into::into )
-			.try_for_each(| binding | binding.add_to_linker( &mut linker ))?;
-		Self::instantiate( self, engine, &linker )
+		let sockets = sockets.into_iter().map( Into::into ).collect::<Vec<_>>();
+		let session_locks = sockets.iter().flat_map( BindingAny::session_locks ).collect();
+		sockets.iter().try_for_each(| binding | binding.add_to_linker( &mut linker ))?;
+		self.instantiate_with_locks( engine, &linker, session_locks )
 	}
 
 	/// Asynchronously links this plugin with its socket bindings and instantiates it.
@@ -345,22 +346,25 @@ where
 	{
 		let caller_id = NEXT_CALLER_ID.fetch_add( 1, Ordering::Relaxed );
 		let mut import_asyncness = HashMap::new();
-		for ( interface, import ) in self.component.component_type().imports( engine ) {
+		for ( import_name, import ) in self.component.component_type().imports( engine ) {
 			let wasmtime::component::types::ComponentItem::ComponentInstance( instance ) = import.ty else { continue; };
 			let functions = instance.exports( engine ).filter_map(|( name, export )| match export.ty {
 				wasmtime::component::types::ComponentItem::ComponentFunc( function ) =>
 					Some(( name.to_string(), function.async_() )),
 				_ => None,
 			}).collect::<HashMap<_, _>>();
-			import_asyncness.insert( interface.to_string(), functions.clone() );
-			if let Some( implements ) = import.implements {
-				import_asyncness.insert( implements.to_string(), functions );
-			}
+			let interface = import.implements.unwrap_or( import_name );
+			import_asyncness.insert( unversioned( interface ).to_string(), ImportMetadata {
+				linker_name: import_name.to_string(),
+				functions,
+			});
 		}
-		sockets.into_iter()
-			.map( Into::into )
-			.try_for_each(| binding | binding.add_to_linker( &mut linker, caller_id, &import_asyncness ))?;
-		Self::instantiate_async( self, engine, &linker ).await
+		let sockets = sockets.into_iter().map( Into::into ).collect::<Vec<_>>();
+		let session_locks = sockets.iter().flat_map( BindingAnyAsync::session_locks ).collect();
+		sockets.iter().try_for_each(| binding |
+			binding.add_to_linker( &mut linker, caller_id, &import_asyncness )
+		)?;
+		self.instantiate_async_with_locks( engine, &linker, session_locks ).await
 	}
 
 	/// A convenience alias for [`Plugin::link`] with 0 sockets
@@ -372,6 +376,16 @@ where
 		engine: &Engine,
 		linker: &Linker<Ctx>
 	) -> Result<PluginInstanceSync<Ctx>, wasmtime::Error> {
+		self.instantiate_with_locks( engine, linker, Vec::new() )
+	}
+
+	fn instantiate_with_locks(
+		self,
+		engine: &Engine,
+		linker: &Linker<Ctx>,
+		session_locks: Vec<crate::dispatch_session::SessionLock>,
+	) -> Result<PluginInstanceSync<Ctx>, wasmtime::Error> {
+		let export_asyncness = component_export_asyncness( &self.component, engine );
 		let mut store = Store::new( engine, self.context );
 		if let Some( fuel ) = self.initial_fuel { store.set_fuel( fuel )?; }
 		if let Some( limiter ) = self.memory_limiter { store.limiter( limiter ); }
@@ -380,6 +394,8 @@ where
 			store,
 			instance,
 			self.interface_remaps,
+			export_asyncness,
+			session_locks,
 			self.fuel_limiter,
 			self.epoch_limiter,
 		))
@@ -418,6 +434,16 @@ where
 		engine: &Engine,
 		linker: &Linker<Ctx>,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
+		self.instantiate_async_with_locks( engine, linker, Vec::new() ).await
+	}
+
+	async fn instantiate_async_with_locks(
+		self,
+		engine: &Engine,
+		linker: &Linker<Ctx>,
+		session_locks: Vec<crate::dispatch_session::SessionLock>,
+	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
+		let export_asyncness = component_export_asyncness( &self.component, engine );
 		let mut store = Store::new( engine, self.context );
 		if let Some( fuel ) = self.initial_fuel { store.set_fuel( fuel )?; }
 		if let Some( limiter ) = self.memory_limiter { store.limiter( limiter ); }
@@ -426,11 +452,35 @@ where
 			store,
 			instance,
 			self.interface_remaps,
+			export_asyncness,
+			session_locks,
 			self.fuel_limiter,
 			self.epoch_limiter,
 		))
 	}
 
+}
+
+fn component_export_asyncness( component: &Component, engine: &Engine ) -> ExportAsyncness {
+	component.component_type().exports( engine ).filter_map(|( interface, export )| {
+		let wasmtime::component::types::ComponentItem::ComponentInstance( instance ) = export.ty else {
+			return None;
+		};
+		let functions = instance.exports( engine ).filter_map(|( name, export )| match export.ty {
+			wasmtime::component::types::ComponentItem::ComponentFunc( function ) =>
+				Some(( name.to_string(), function.async_() )),
+			_ => None,
+		}).collect();
+		let interface = export.implements.unwrap_or( interface );
+		Some(( unversioned( interface ).to_string(), functions ))
+	}).collect()
+}
+
+fn unversioned( interface: &str ) -> &str {
+	match interface.split_once( '@' ) {
+		Some(( interface, _ )) => interface,
+		None => interface,
+	}
 }
 
 impl<Ctx: std::fmt::Debug + 'static> std::fmt::Debug for Plugin<Ctx> {

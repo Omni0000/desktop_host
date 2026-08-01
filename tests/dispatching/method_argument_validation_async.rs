@@ -42,7 +42,7 @@ fn native_async_method_metadata_rejects_calls_without_resource_argument() -> Res
 			ExactlyOne( "startup".to_string(), startup ),
 		);
 
-		let result = root.dispatch_async( "root", "get-primitive", &[] ).await?;
+		let result = root.dispatch( "root", "get-primitive", &[] ).await?;
 		assert!( matches!(
 			result,
 			ExactlyOne( _, Ok( Val::Result( Err( None ))))

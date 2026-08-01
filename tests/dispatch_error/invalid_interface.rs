@@ -25,7 +25,7 @@ fn async_dispatch_error_invalid_interface() -> Result<(), Box<dyn std::error::Er
 		);
 
 		assert!( matches!(
-			binding.dispatch_async( "nonexistent", "test", &[] ).await,
+			binding.dispatch( "nonexistent", "test", &[] ).await,
 			Err( DispatchError::InvalidInterfacePath( _ ))
 		));
 		Ok(())

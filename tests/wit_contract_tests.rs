@@ -7,6 +7,9 @@ use wasmtime::Store ;
 use wit_component::{ ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata };
 use wit_parser::{ ManglingAndAbi, Resolve, TypeDefKind, WorldItem };
 
+#[derive( Debug, thiserror::Error )]
+#[error( "trap" )]
+struct TestRuntimeError;
 
 
 #[test]
@@ -79,7 +82,7 @@ fn dispatch_error_values() -> Vec<Val> {
 		DispatchError::InvalidInterfacePath( "package/interface".to_string() ).into(),
 		DispatchError::InvalidFunction( "function".to_string() ).into(),
 		DispatchError::MissingResponse.into(),
-		DispatchError::RuntimeException( wasmtime::Error::msg( "trap" )).into(),
+		DispatchError::RuntimeException( TestRuntimeError.into() ).into(),
 		DispatchError::InvalidArgumentList.into(),
 		DispatchError::UnsupportedType( "future".to_string() ).into(),
 		DispatchError::ResourceCreationError( ResourceCreationError::ResourceTableFull ).into(),

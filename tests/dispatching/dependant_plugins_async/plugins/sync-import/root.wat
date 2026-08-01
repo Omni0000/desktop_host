@@ -1,0 +1,21 @@
+(component
+	(type $child-interface (instance
+		(type $dispatch-error' (variant
+			(case "lock-rejected")
+			(case "invalid-interface-path" string)
+			(case "invalid-function" string)
+			(case "missing-response")
+			(case "runtime-exception" string)
+			(case "invalid-argument-list")
+			(case "unsupported-type" string)
+			(case "resource-table-full")
+			(case "resource-handle-conversion-failed")
+			(case "invalid-resource-handle")
+		))
+		(export "dispatch-error" (type (eq $dispatch-error')))
+		(type $dispatch-result (result u32 (error 1)))
+		(type $get-value (func (result (tuple string $dispatch-result))))
+		(export "get-value" (func (type $get-value)))
+	))
+	(import "test:async-child/root" (instance (type $child-interface)))
+)

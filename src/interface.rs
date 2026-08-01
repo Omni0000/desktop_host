@@ -1,11 +1,13 @@
 use std::sync::Arc ;
 use std::collections::{ HashMap, HashSet };
 use futures::lock::Mutex ;
+use thiserror::Error ;
 use wasmtime::{ AsContextMut, component::{ Linker, ResourceType, Val }};
 
 use crate::{ Binding, PluginContext, PluginInstanceAsync, PluginInstanceSync };
 use crate::cardinality::Cardinality ;
 use crate::linker::{
+	DispatchTarget,
 	dispatch_all,
 	dispatch_all_async,
 	dispatch_all_async_blocking,
@@ -14,6 +16,14 @@ use crate::linker::{
 	dispatch_method_async_blocking,
 };
 use crate::resource_wrapper::ResourceWrapper ;
+
+#[derive( Debug, Error )]
+enum LinkError {
+	#[error( "synchronously instantiated plugin exposes async export `{interface}.{function}`" )]
+	SyncInstanceAsyncExport { interface: String, function: String },
+	#[error( "synchronous import `{interface}.{function}` cannot call an async plugin export" )]
+	SyncImportAsyncExport { interface: String, function: String },
+}
 
 /// A single WIT interface within a [`Binding`].
 ///
@@ -62,11 +72,14 @@ impl Interface {
 		self.functions.get( name )
 	}
 
+	pub(crate) fn function_names( &self ) -> impl Iterator<Item = &str> {
+		self.functions.keys().map( String::as_str )
+	}
+
 	#[inline]
 	pub(crate) fn add_to_linker<PluginId, Ctx, Plugins>(
 		&self,
 		linker: &mut Linker<Ctx>,
-		package_name: &str,
 		interface_ident: &str,
 		interface_name: &str,
 		binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceSync<Ctx>>,
@@ -81,6 +94,7 @@ impl Interface {
 	{
 		let mut linker_root = linker.root();
 		let mut linker_instance = linker_root.instance( interface_ident )?;
+		let package_name = binding.package_name();
 
 		self.functions.iter().try_for_each(|( name, metadata )| {
 
@@ -115,7 +129,6 @@ impl Interface {
 	pub(crate) fn add_to_linker_async_sync<PluginId, Ctx, Plugins>(
 		&self,
 		linker: &mut Linker<Ctx>,
-		package_name: &str,
 		interface_ident: &str,
 		interface_name: &str,
 		binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceSync<Ctx>>,
@@ -131,16 +144,15 @@ impl Interface {
 	{
 		let mut linker_root = linker.root();
 		let mut linker_instance = linker_root.instance( interface_ident )?;
+		let package_name = binding.package_name();
 
 		self.functions.iter().try_for_each(|( name, metadata )| {
-			let destination_is_async = Binding::sync_export_is_async(
-				binding,
-				package_name,
-				interface_name,
-				name,
-			)?;
+			let destination_is_async = binding.export_is_async( interface_name, name );
 			if destination_is_async {
-				return Err( wasmtime::Error::msg( "synchronously instantiated plugin exposes an async function" ));
+				return Err( LinkError::SyncInstanceAsyncExport {
+					interface: interface_ident.to_string(),
+					function: name.clone(),
+				}.into() );
 			}
 			let import_is_async = imports.and_then(| functions | functions.get( name )).copied().unwrap_or( false );
 			let package_name = package_name.to_string();
@@ -207,7 +219,6 @@ impl Interface {
 	pub(crate) fn add_to_linker_async<PluginId, Ctx, Plugins>(
 		&self,
 		linker: &mut Linker<Ctx>,
-		package_name: &str,
 		interface_ident: &str,
 		interface_name: &str,
 		binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
@@ -224,19 +235,16 @@ impl Interface {
 	{
 		let mut linker_root = linker.root();
 		let mut linker_instance = linker_root.instance( interface_ident )?;
+		let package_name = binding.package_name();
 
 		self.functions.iter().try_for_each(|( name, metadata )| {
-			let destination_is_async = Binding::export_is_async(
-				binding,
-				package_name,
-				interface_name,
-				name,
-			)?;
+			let destination_is_async = binding.export_is_async( interface_name, name );
 			let import_is_async = imports.and_then(| functions | functions.get( name )).copied().unwrap_or( false );
 			if destination_is_async && !import_is_async {
-				return Err( wasmtime::Error::msg( format!(
-					"synchronous import `{interface_ident}.{name}` cannot call an async plugin export"
-				)));
+				return Err( LinkError::SyncImportAsyncExport {
+					interface: interface_ident.to_string(),
+					function: name.clone(),
+				}.into() );
 			}
 			let package_name = package_name.to_string();
 			let interface_name = interface_name.to_string();
@@ -252,8 +260,9 @@ impl Interface {
 					let function_name = function_name.clone();
 					let function = function.clone();
 					Box::pin( async move {
+						let target = DispatchTarget::new( &package_name, &interface_name, &function_name, &function );
 						results[0] = $dispatch(
-							&binding, caller_id, ctx, &package_name, &interface_name, &function_name, &function, args,
+							&binding, caller_id, ctx, &target, args,
 						).await;
 						Ok(())
 					})
@@ -268,8 +277,9 @@ impl Interface {
 					let function_name = function_name.clone();
 					let function = function.clone();
 					Box::new( async move {
+						let target = DispatchTarget::new( &package_name, &interface_name, &function_name, &function );
 						results[0] = $dispatch(
-							&binding, caller_id, ctx, &package_name, &interface_name, &function_name, &function, args,
+							&binding, caller_id, ctx, &target, args,
 						).await;
 						Ok(())
 					})

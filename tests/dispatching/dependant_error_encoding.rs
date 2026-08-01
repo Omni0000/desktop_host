@@ -82,7 +82,7 @@ fn async_dependant_dispatch_encodes_child_errors() -> Result<(), Box<dyn std::er
 			ExactlyOne( "startup".to_string(), startup ),
 		);
 
-		let result = root.dispatch_async( "root", "get-value", &[] ).await?;
+		let result = root.dispatch( "root", "get-value", &[] ).await?;
 		assert!( matches!(
 			&result,
 			ExactlyOne( _, Ok( Val::Tuple( items ))) if matches!( items.as_slice(),

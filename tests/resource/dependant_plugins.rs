@@ -70,7 +70,7 @@ fn async_resource_test_wrapper() {
 			ExactlyOne( "_".to_string(), consumer_instance ),
 		);
 
-		match root_binding.dispatch_async( "root", "get-value", &[] ).await {
+		match root_binding.dispatch( "root", "get-value", &[] ).await {
 			Ok( ExactlyOne( _, Ok( Val::U32( 42 )))) => {}
 			Ok( ExactlyOne( _, Ok( val ))) => panic!( "Expected U32(42), got: {:#?}", val ),
 			Ok( ExactlyOne( _, Err( err ))) => panic!( "Method call failed: {:?}", err ),

@@ -78,7 +78,7 @@ fn async_method_metadata_rejects_calls_without_resource_argument() -> Result<(),
 			ExactlyOne( "startup".to_string(), startup ),
 		);
 
-		let result = root.dispatch_async( "root", "get-value", &[] ).await?;
+		let result = root.dispatch( "root", "get-value", &[] ).await?;
 		assert!( matches!(
 			&result,
 			ExactlyOne( _, Ok( Val::Result( Err( Some( error ))))) if
