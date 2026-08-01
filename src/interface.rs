@@ -10,10 +10,10 @@ use crate::linker::{
 	DispatchTarget,
 	dispatch_all,
 	dispatch_all_async,
-	dispatch_all_async_blocking,
+	dispatch_all_async_sync,
 	dispatch_method,
 	dispatch_method_async,
-	dispatch_method_async_blocking,
+	dispatch_method_async_sync,
 };
 use crate::resource_wrapper::ResourceWrapper ;
 
@@ -159,7 +159,7 @@ impl Interface {
 			let function_name = name.clone();
 			let function = metadata.clone();
 
-			macro_rules! link_blocking {( $dispatch: expr ) => {
+			macro_rules! link_sync {( $dispatch: expr ) => {
 				linker_instance.func_new_async( name, move | ctx, _ty, args, results | {
 					let value = $dispatch(
 						&binding,
@@ -201,8 +201,8 @@ impl Interface {
 			match ( import_is_async, metadata.kind() ) {
 				( true, FunctionKind::Freestanding ) => link_concurrent!( dispatch_all ),
 				( true, FunctionKind::Method ) => link_concurrent!( dispatch_method ),
-				( false, FunctionKind::Freestanding ) => link_blocking!( dispatch_all ),
-				( false, FunctionKind::Method ) => link_blocking!( dispatch_method ),
+				( false, FunctionKind::Freestanding ) => link_sync!( dispatch_all ),
+				( false, FunctionKind::Method ) => link_sync!( dispatch_method ),
 			}
 		})?;
 
@@ -268,7 +268,7 @@ impl Interface {
 				})
 			}}}
 
-			macro_rules! link_blocking {( $dispatch: expr ) => {{
+			macro_rules! link_sync {( $dispatch: expr ) => {{
 				let caller = caller;
 				let scheduler_slot = Arc::clone( scheduler_slot );
 				linker_instance.func_new_async( name, move | ctx, _ty, args, results | {
@@ -294,8 +294,8 @@ impl Interface {
 			match ( import_is_async, metadata.kind() ) {
 				( true, FunctionKind::Freestanding ) => link_concurrent!( dispatch_all_async ),
 				( true, FunctionKind::Method ) => link_concurrent!( dispatch_method_async ),
-				( false, FunctionKind::Freestanding ) => link_blocking!( dispatch_all_async_blocking ),
-				( false, FunctionKind::Method ) => link_blocking!( dispatch_method_async_blocking ),
+				( false, FunctionKind::Freestanding ) => link_sync!( dispatch_all_async_sync ),
+				( false, FunctionKind::Method ) => link_sync!( dispatch_method_async_sync ),
 			}
 		})?;
 

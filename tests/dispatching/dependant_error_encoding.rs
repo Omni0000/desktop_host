@@ -76,12 +76,12 @@ fn async_dependant_dispatch_encodes_child_errors() -> Result<(), Box<dyn std::er
 			linker.clone(),
 			vec![ dependency.clone() ],
 		).await?;
-		let startup_blocking = plugins.startup.plugin.link_async(
+		let startup_sync = plugins.startup.plugin.link_async(
 			&engine,
 			linker,
 			vec![ dependency ],
 		).await?;
-		for startup in [ startup_async, startup_blocking ] {
+		for startup in [ startup_async, startup_sync ] {
 			let root = Binding::new(
 				bindings.root.package.clone(),
 				HashMap::from([( bindings.root.name.clone(), bindings.root.spec.clone() )]),

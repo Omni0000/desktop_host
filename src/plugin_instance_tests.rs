@@ -5,11 +5,10 @@ use wasmtime::{ Config, Engine, Store };
 use wasmtime::component::{ Component, FutureReader, Linker, ResourceTable, StreamReader, Val };
 
 use super::{
-	AsyncInstanceRuntime, AsyncRequest, AsyncRuntimeError, AttachedDriver, DriverMessage,
-	DriverState, NativeAsyncInstance, PluginInstanceAsync, PluginState, ensure_supported_value,
-	receive_response,
+	AsyncInstanceInner, AsyncLinkage, AsyncRequest, AsyncRuntimeError, AttachedDriver, DriverMessage,
+	DriverState, PluginInstanceAsync, PluginState, ensure_supported_value, receive_response,
 };
-use crate::async_scheduler::{ AsyncScheduler, DispatchContext, PluginGraph, SchedulerSlot };
+use crate::async_scheduler::{ AsyncScheduler, DispatchContext, PluginNode, SchedulerSlot };
 use crate::{ DispatchError, Function, FunctionKind, PluginContext, ReturnKind };
 
 struct Context { table: ResourceTable }
@@ -59,11 +58,11 @@ fn stopped_driver_rejects_the_request_with_the_exact_error() -> Result<(), Box<d
 #[test]
 fn closed_scheduler_rejects_a_call_with_the_exact_cancellation_error() -> Result<(), Box<dyn std::error::Error>> {
 	let state = test_state_without_concurrency()?;
-	let graph = PluginGraph::new( Vec::new() );
+	let plugin_node = PluginNode::new( Vec::new() );
 	let plugin = PluginInstanceAsync::from( super::PluginInstanceSync {
 		state,
 		export_effects: std::collections::HashMap::new(),
-		graph,
+		plugin_node,
 	});
 	let scheduler = AsyncScheduler::testing();
 	let path = scheduler.root_path();
@@ -97,20 +96,20 @@ fn attached_driver_records_its_exact_terminal_error() {
 fn store_failure_reaches_the_call_as_the_exact_runtime_error() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
 		let PluginState { store, instance, .. } = test_state_without_concurrency()?;
-		let graph = PluginGraph::new( Vec::new() );
+		let plugin_node = PluginNode::new( Vec::new() );
 		let plugin = PluginInstanceAsync::new(
 			store,
 			instance,
 			std::collections::HashMap::new(),
 			std::collections::HashMap::new(),
-			AsyncInstanceRuntime::new( graph.clone(), SchedulerSlot::new() ),
+			AsyncLinkage::new( plugin_node.clone(), SchedulerSlot::new() ),
 			None,
 			None,
 		);
 		let expected = AsyncRuntimeError::StoreFailed(
 			"cannot use `run_concurrent` when Config::concurrency_support disabled".to_string(),
 		);
-		let result = crate::async_scheduler::run( vec![ graph ], move | scheduler | async move {
+		let result = crate::async_scheduler::run( vec![ plugin_node ], move | scheduler | async move {
 			let path = scheduler.root_path();
 			plugin.dispatch_async(
 				DispatchContext::new( &scheduler, scheduler.origin(), path ),
@@ -185,7 +184,7 @@ fn concurrent_driver_reports_exact_invalid_export_errors() -> Result<(), Box<dyn
 #[test]
 fn limited_driver_queues_calls_and_finishes_them_before_shutdown() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
-		let mut state = test_blocking_state().await?;
+		let mut state = test_sync_state().await?;
 		state.epoch_limiter = Some( Box::new(| _, _, _, _ | u64::MAX ));
 		let ( sender, receiver ) = futures::channel::mpsc::unbounded();
 		let ( first, first_result ) = blocking_request( "get-primitive" );
@@ -220,13 +219,13 @@ fn limited_driver_reset_cancels_the_exact_active_call() -> Result<(), Box<dyn st
 fn native_inner(
 	sender: futures::channel::mpsc::UnboundedSender<DriverMessage>,
 	driver: DriverState,
-) -> Arc<NativeAsyncInstance<Context>> {
-	Arc::new( NativeAsyncInstance {
+) -> Arc<AsyncInstanceInner<Context>> {
+	Arc::new( AsyncInstanceInner {
 		sender,
 		driver: std::sync::Mutex::new( driver ),
 		interface_remaps: std::collections::HashMap::new(),
 		export_effects: std::collections::HashMap::new(),
-		graph: PluginGraph::new( Vec::new() ),
+		plugin_node: PluginNode::new( Vec::new() ),
 		scheduler_slot: SchedulerSlot::new(),
 	})
 }
@@ -288,7 +287,7 @@ async fn test_state() -> Result<PluginState<Context>, Box<dyn std::error::Error>
 	})
 }
 
-async fn test_blocking_state() -> Result<PluginState<Context>, Box<dyn std::error::Error>> {
+async fn test_sync_state() -> Result<PluginState<Context>, Box<dyn std::error::Error>> {
 	let engine = Engine::default();
 	let component = Component::from_file(
 		&engine,

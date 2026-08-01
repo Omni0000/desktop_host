@@ -10,7 +10,7 @@ use wasmtime::component::{ Accessor, Func, Instance, Val };
 use wasmtime::{ AsContextMut, Store };
 
 use crate::{ Function, PluginContext, Remap, ReturnKind };
-use crate::async_scheduler::{ AsyncScheduler, DispatchContext, PluginGraph, SchedulerSlot, SchedulerSlotGuard };
+use crate::async_scheduler::{ AsyncScheduler, DispatchContext, PluginNode, SchedulerSlot, SchedulerSlotGuard };
 use crate::resource_wrapper::{ ResourceCreationError, ResourceReceiveError };
 
 type CallLimiter<Ctx> = Box<dyn FnMut( &mut Store<Ctx>, &str, &str, &Function ) -> u64 + Send>;
@@ -23,7 +23,7 @@ type CallLimiter<Ctx> = Box<dyn FnMut( &mut Store<Ctx>, &str, &str, &Function ) 
 pub struct PluginInstanceSync<Ctx: 'static> {
 	state: PluginState<Ctx>,
 	export_effects: ExportEffects,
-	graph: PluginGraph,
+	plugin_node: PluginNode,
 }
 
 /// An asynchronously instantiated plugin, ready for asynchronous dispatch.
@@ -32,51 +32,51 @@ pub struct PluginInstanceSync<Ctx: 'static> {
 /// or [`Plugin::link_async`]( crate::Plugin::link_async ). Its Wasmtime [`Store`]
 /// is driven cooperatively by the future returned from asynchronous dispatch.
 pub struct PluginInstanceAsync<Ctx: 'static> {
-	instance: AsyncInstance<Ctx>,
+	instance: PluginInstanceKind<Ctx>,
 }
 
 impl<Ctx> Clone for PluginInstanceAsync<Ctx> {
 	fn clone( &self ) -> Self { Self { instance: self.instance.clone() } }
 }
 
-enum AsyncInstance<Ctx: 'static> {
-	Native( Arc<NativeAsyncInstance<Ctx>> ),
-	AdaptedSync( Arc<AdaptedSyncInstance<Ctx>> ),
+enum PluginInstanceKind<Ctx: 'static> {
+	Async( Arc<AsyncInstanceInner<Ctx>> ),
+	Sync( Arc<SyncInstanceInner<Ctx>> ),
 }
 
-struct AdaptedSyncInstance<Ctx: 'static> {
+struct SyncInstanceInner<Ctx: 'static> {
 	state: Mutex<PluginState<Ctx>>,
 	interface_remaps: HashMap<String, Remap>,
 	export_effects: ExportEffects,
-	graph: PluginGraph,
+	plugin_node: PluginNode,
 }
 
-impl<Ctx> Clone for AsyncInstance<Ctx> {
+impl<Ctx> Clone for PluginInstanceKind<Ctx> {
 	fn clone( &self ) -> Self {
 		match self {
-			Self::Native( inner ) => Self::Native( Arc::clone( inner )),
-			Self::AdaptedSync( inner ) => Self::AdaptedSync( Arc::clone( inner )),
+			Self::Async( inner ) => Self::Async( Arc::clone( inner )),
+			Self::Sync( inner ) => Self::Sync( Arc::clone( inner )),
 		}
 	}
 }
 
-struct NativeAsyncInstance<Ctx: 'static> {
+struct AsyncInstanceInner<Ctx: 'static> {
 	sender: mpsc::UnboundedSender<DriverMessage>,
 	driver: StdMutex<DriverState>,
 	interface_remaps: HashMap<String, Remap>,
 	export_effects: ExportEffects,
-	graph: PluginGraph,
+	plugin_node: PluginNode,
 	scheduler_slot: Arc<SchedulerSlot<Ctx>>,
 }
 
-pub(crate) struct AsyncInstanceRuntime<Ctx: 'static> {
-	graph: PluginGraph,
+pub(crate) struct AsyncLinkage<Ctx: 'static> {
+	plugin_node: PluginNode,
 	scheduler_slot: Arc<SchedulerSlot<Ctx>>,
 }
 
-impl<Ctx: 'static> AsyncInstanceRuntime<Ctx> {
-	pub(crate) fn new( graph: PluginGraph, scheduler_slot: Arc<SchedulerSlot<Ctx>> ) -> Self {
-		Self { graph, scheduler_slot }
+impl<Ctx: 'static> AsyncLinkage<Ctx> {
+	pub(crate) fn new( plugin_node: PluginNode, scheduler_slot: Arc<SchedulerSlot<Ctx>> ) -> Self {
+		Self { plugin_node, scheduler_slot }
 	}
 }
 
@@ -84,7 +84,7 @@ pub(crate) type ExportEffects = HashMap<String, HashMap<String, bool>>;
 type DriverFuture = BoxFuture<'static, AsyncRuntimeError>;
 
 pub(crate) trait InstanceMetadata {
-	fn graph( &self ) -> &PluginGraph;
+	fn plugin_node( &self ) -> &PluginNode;
 	fn export_is_async( &self, package_name: &str, interface_name: &str, function_name: &str ) -> bool;
 }
 
@@ -161,8 +161,8 @@ impl<Ctx: 'static> std::fmt::Debug for PluginInstanceAsync<Ctx> {
 	fn fmt( &self, f: &mut std::fmt::Formatter<'_> ) -> std::result::Result<(), std::fmt::Error> {
 		f.debug_struct( "PluginInstanceAsync" )
 			.field( "state", &match &self.instance {
-				AsyncInstance::Native( _ ) => "<session-managed async store>",
-				AsyncInstance::AdaptedSync( _ ) => "<session-managed sync store>",
+				PluginInstanceKind::Async( _ ) => "<session-managed async store>",
+				PluginInstanceKind::Sync( _ ) => "<session-managed sync store>",
 			})
 			.finish_non_exhaustive()
 	}
@@ -215,7 +215,7 @@ impl<Ctx: PluginContext + 'static> PluginInstanceSync<Ctx> {
 		instance: Instance,
 		interface_remaps: HashMap<String, Remap>,
 		export_effects: ExportEffects,
-		graph: PluginGraph,
+		plugin_node: PluginNode,
 		fuel_limiter: Option<CallLimiter<Ctx>>,
 		epoch_limiter: Option<CallLimiter<Ctx>>,
 	) -> Self {
@@ -225,7 +225,7 @@ impl<Ctx: PluginContext + 'static> PluginInstanceSync<Ctx> {
 			interface_remaps,
 			fuel_limiter,
 			epoch_limiter,
-		}, export_effects, graph }
+		}, export_effects, plugin_node }
 	}
 
 	pub(crate) fn dispatch(
@@ -247,12 +247,12 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 		instance: Instance,
 		interface_remaps: HashMap<String, Remap>,
 		export_effects: ExportEffects,
-		runtime: AsyncInstanceRuntime<Ctx>,
+		linkage: AsyncLinkage<Ctx>,
 		fuel_limiter: Option<CallLimiter<Ctx>>,
 		epoch_limiter: Option<CallLimiter<Ctx>>,
 	) -> Self {
 		let exported_interface_remaps = interface_remaps.clone();
-		let AsyncInstanceRuntime { graph, scheduler_slot } = runtime;
+		let AsyncLinkage { plugin_node, scheduler_slot } = linkage;
 		let mut state = PluginState {
 			store,
 			instance,
@@ -261,13 +261,13 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 			epoch_limiter,
 		};
 		Self {
-			instance: AsyncInstance::Native({
+			instance: PluginInstanceKind::Async({
 				let ( sender, receiver ) = mpsc::unbounded();
-				Arc::new( NativeAsyncInstance {
+				Arc::new( AsyncInstanceInner {
 					sender,
 					interface_remaps: exported_interface_remaps,
 					export_effects,
-					graph,
+					plugin_node,
 					scheduler_slot,
 					driver: StdMutex::new( DriverState::Idle( Box::pin( async move {
 						state.run_requests( receiver ).await
@@ -302,8 +302,8 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 
 	pub(crate) fn admit( &self, scheduler: &AsyncScheduler<Ctx>, request: AsyncRequest ) {
 		match &self.instance {
-			AsyncInstance::Native( inner ) => inner.enqueue( scheduler, request ),
-			AsyncInstance::AdaptedSync( inner ) => {
+			PluginInstanceKind::Async( inner ) => inner.enqueue( scheduler, request ),
+			PluginInstanceKind::Sync( inner ) => {
 				let inner = Arc::clone( inner );
 				scheduler.attach_driver( Box::pin( async move {
 					let mut state = inner.state.lock().await;
@@ -320,10 +320,10 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 		}
 	}
 
-	pub(crate) fn graph( &self ) -> &PluginGraph {
+	pub(crate) fn plugin_node( &self ) -> &PluginNode {
 		match &self.instance {
-			AsyncInstance::Native( inner ) => &inner.graph,
-			AsyncInstance::AdaptedSync( inner ) => &inner.graph,
+			PluginInstanceKind::Async( inner ) => &inner.plugin_node,
+			PluginInstanceKind::Sync( inner ) => &inner.plugin_node,
 		}
 	}
 
@@ -333,19 +333,19 @@ impl<Ctx: PluginContext + 'static> From<PluginInstanceSync<Ctx>> for PluginInsta
 	/// Makes a synchronous instance usable in an async binding without changing
 	/// how its Wasmtime store was instantiated.
 	fn from( instance: PluginInstanceSync<Ctx> ) -> Self {
-		let PluginInstanceSync { state, export_effects, graph } = instance;
+		let PluginInstanceSync { state, export_effects, plugin_node } = instance;
 		let interface_remaps = state.interface_remaps.clone();
-		Self { instance: AsyncInstance::AdaptedSync( Arc::new( AdaptedSyncInstance {
+		Self { instance: PluginInstanceKind::Sync( Arc::new( SyncInstanceInner {
 			state: Mutex::new( state ),
 			interface_remaps,
 			export_effects,
-			graph,
+			plugin_node,
 		}))}
 	}
 }
 
 impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceSync<Ctx> {
-	fn graph( &self ) -> &PluginGraph { &self.graph }
+	fn plugin_node( &self ) -> &PluginNode { &self.plugin_node }
 
 	fn export_is_async( &self, package_name: &str, interface_name: &str, function_name: &str ) -> bool {
 		export_is_async(
@@ -359,23 +359,23 @@ impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceSync<Ctx> 
 }
 
 impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceAsync<Ctx> {
-	fn graph( &self ) -> &PluginGraph {
+	fn plugin_node( &self ) -> &PluginNode {
 		match &self.instance {
-			AsyncInstance::Native( inner ) => &inner.graph,
-			AsyncInstance::AdaptedSync( inner ) => &inner.graph,
+			PluginInstanceKind::Async( inner ) => &inner.plugin_node,
+			PluginInstanceKind::Sync( inner ) => &inner.plugin_node,
 		}
 	}
 
 	fn export_is_async( &self, package_name: &str, interface_name: &str, function_name: &str ) -> bool {
 		match &self.instance {
-			AsyncInstance::Native( inner ) => export_is_async(
+			PluginInstanceKind::Async( inner ) => export_is_async(
 				&inner.export_effects,
 				&inner.interface_remaps,
 				package_name,
 				interface_name,
 				function_name,
 			),
-			AsyncInstance::AdaptedSync( inner ) => export_is_async(
+			PluginInstanceKind::Sync( inner ) => export_is_async(
 				&inner.export_effects,
 				&inner.interface_remaps,
 				package_name,
@@ -386,7 +386,7 @@ impl<Ctx: PluginContext + 'static> InstanceMetadata for PluginInstanceAsync<Ctx>
 	}
 }
 
-impl<Ctx: PluginContext + 'static> NativeAsyncInstance<Ctx> {
+impl<Ctx: PluginContext + 'static> AsyncInstanceInner<Ctx> {
 	fn enqueue(
 		self: &Arc<Self>,
 		scheduler: &AsyncScheduler<Ctx>,
@@ -422,7 +422,7 @@ impl<Ctx: PluginContext + 'static> NativeAsyncInstance<Ctx> {
 
 }
 
-impl<Ctx: 'static> NativeAsyncInstance<Ctx> {
+impl<Ctx: 'static> AsyncInstanceInner<Ctx> {
 	fn release( &self, future: DriverFuture ) {
 		*self.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner ) = DriverState::Idle( future );
 	}
@@ -433,7 +433,7 @@ impl<Ctx: 'static> NativeAsyncInstance<Ctx> {
 }
 
 struct AttachedDriver<Ctx: 'static> {
-	inner: Arc<NativeAsyncInstance<Ctx>>,
+	inner: Arc<AsyncInstanceInner<Ctx>>,
 	future: Option<DriverFuture>,
 	_slot: SchedulerSlotGuard<Ctx>,
 }

@@ -223,7 +223,7 @@ where
 }
 
 /// Asynchronously implements a synchronous WIT import without blocking its host thread.
-pub(crate) async fn dispatch_all_async_blocking<PluginId, Ctx, Plugins>(
+pub(crate) async fn dispatch_all_async_sync<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
 	scheduler: &AsyncScheduler<Ctx>,
 	caller: PluginKey,
@@ -243,7 +243,7 @@ where
 	debug_assert_eq!( target.function.kind(), FunctionKind::Freestanding );
 	let ctx = Mutex::new( ctx );
 	binding.plugins().map_async(| plugin_id, plugin | async {
-		Val::Result( match dispatch_of_async_blocking( DispatchContext::new( scheduler, caller, path ), &ctx, plugin_id, plugin, target, data ).await {
+		Val::Result( match dispatch_of_async_sync( DispatchContext::new( scheduler, caller, path ), &ctx, plugin_id, plugin, target, data ).await {
 			Ok( val ) => Ok( Some( Box::new( val ))),
 			Err( err ) => Err( Some( Box::new( err.into() ))),
 		})
@@ -251,7 +251,7 @@ where
 }
 
 /// Asynchronously implements a synchronous WIT method import.
-pub(crate) async fn dispatch_method_async_blocking<PluginId, Ctx, Plugins>(
+pub(crate) async fn dispatch_method_async_sync<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
 	scheduler: &AsyncScheduler<Ctx>,
 	caller: PluginKey,
@@ -269,7 +269,7 @@ where
 {
 	debug_assert_eq!( target.function.kind(), FunctionKind::Method );
 	let ctx = Mutex::new( ctx );
-	Val::Result( match route_method_async_blocking(
+	Val::Result( match route_method_async_sync(
 		binding,
 		scheduler,
 		caller,
@@ -314,7 +314,7 @@ where
 	}
 }
 
-async fn dispatch_of_async_blocking<PluginId, Ctx>(
+async fn dispatch_of_async_sync<PluginId, Ctx>(
 	dispatch: DispatchContext<'_, Ctx>,
 	ctx: &Mutex<StoreContextMut<'_, Ctx>>,
 	plugin_id: PluginId,
@@ -379,7 +379,7 @@ where
 	dispatch_of_async( DispatchContext::new( scheduler, caller, path ), ctx, plugin_id, plugin, target, &data ).await
 }
 
-async fn route_method_async_blocking<PluginId, Ctx, Plugins>(
+async fn route_method_async_sync<PluginId, Ctx, Plugins>(
 	binding: &Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>,
 	scheduler: &AsyncScheduler<Ctx>,
 	caller: PluginKey,
@@ -409,7 +409,7 @@ where
 		.clone();
 	let mut data = Vec::from( data );
 	data[0] = Val::Resource( resource_handle );
-	dispatch_of_async_blocking( DispatchContext::new( scheduler, caller, path ), ctx, plugin_id, plugin, target, &data ).await
+	dispatch_of_async_sync( DispatchContext::new( scheduler, caller, path ), ctx, plugin_id, plugin, target, &data ).await
 }
 
 fn wrap_resources<T, Id>( val: Val, plugin_id: Id, store: &mut StoreContextMut<T> ) -> Result<Val, DispatchError>

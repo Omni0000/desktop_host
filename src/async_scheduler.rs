@@ -15,17 +15,17 @@ use crate::PluginContext;
 
 
 #[derive( Clone, Debug )]
-pub(crate) struct PluginGraph( Arc<PluginGraphNode> );
+pub(crate) struct PluginNode( Arc<PluginNodeData> );
 
 #[derive( Debug )]
-struct PluginGraphNode {
+struct PluginNodeData {
 	gate: Mutex<()>,
-	dependencies: Vec<PluginGraph>,
+	dependencies: Vec<PluginNode>,
 }
 
-impl PluginGraph {
+impl PluginNode {
 	pub(crate) fn new( dependencies: Vec<Self> ) -> Self {
-		Self( Arc::new( PluginGraphNode {
+		Self( Arc::new( PluginNodeData {
 			gate: Mutex::new(()),
 			dependencies,
 		}))
@@ -179,7 +179,7 @@ impl<Ctx: PluginContext + 'static> AsyncScheduler<Ctx> {
 			request.cancel();
 			return;
 		}
-		let destination = target.graph().key();
+		let destination = target.plugin_node().key();
 		let call = ScheduledCall { sequence: state.next_sequence, target, request };
 		state.next_sequence += 1;
 		let queues = state.ready.entry( path.depth ).or_default();
@@ -334,7 +334,7 @@ impl<K: Clone + Eq + Hash, V> RoundRobin<K, V> {
 }
 
 
-pub(crate) async fn run<Ctx, R, F, MakeFuture>( roots: Vec<PluginGraph>, make_future: MakeFuture ) -> R
+pub(crate) async fn run<Ctx, R, F, MakeFuture>( roots: Vec<PluginNode>, make_future: MakeFuture ) -> R
 where
 	Ctx: PluginContext + 'static,
 	R: Send + 'static,
@@ -354,8 +354,8 @@ where
 	result
 }
 
-fn graph_metadata( roots: &[PluginGraph] ) -> ( Vec<PluginGraph>, HashMap<PluginKey, usize> ) {
-	fn visit( node: &PluginGraph, depth: usize, depths: &mut HashMap<PluginKey, ( PluginGraph, usize )> ) {
+fn graph_metadata( roots: &[PluginNode] ) -> ( Vec<PluginNode>, HashMap<PluginKey, usize> ) {
+	fn visit( node: &PluginNode, depth: usize, depths: &mut HashMap<PluginKey, ( PluginNode, usize )> ) {
 		let key = node.key();
 		if depths.get( &key ).is_some_and(|( _, previous )| *previous >= depth ) { return; }
 		depths.insert( key, ( node.clone(), depth ));
@@ -364,8 +364,8 @@ fn graph_metadata( roots: &[PluginGraph] ) -> ( Vec<PluginGraph>, HashMap<Plugin
 
 	let mut depths = HashMap::new();
 	for root in roots { visit( root, 0, &mut depths ); }
-	let mut nodes = depths.values().map(|( graph, _ )| graph.clone()).collect::<Vec<_>>();
-	nodes.sort_unstable_by_key( PluginGraph::address );
+	let mut nodes = depths.values().map(|( node, _ )| node.clone()).collect::<Vec<_>>();
+	nodes.sort_unstable_by_key( PluginNode::address );
 	( nodes, depths.into_iter().map(|( key, ( _, depth ))| ( key, depth )).collect())
 }
 
@@ -433,7 +433,7 @@ mod tests {
 
 	use wasmtime::component::ResourceTable;
 
-	use super::{ AsyncScheduler, Created, DestinationQueue, ExecutionPathId, PluginGraph, oldest_destination };
+	use super::{ AsyncScheduler, Created, DestinationQueue, ExecutionPathId, PluginNode, oldest_destination };
 	use crate::PluginContext;
 
 	struct TestContext { resources: ResourceTable }
@@ -453,8 +453,8 @@ mod tests {
 
 	#[test]
 	fn destination_queue_rotates_callers_then_paths_and_preserves_path_fifo() {
-		let caller_a = PluginGraph::new( Vec::new() );
-		let caller_b = PluginGraph::new( Vec::new() );
+		let caller_a = PluginNode::new( Vec::new() );
+		let caller_b = PluginNode::new( Vec::new() );
 		let mut queue = DestinationQueue::default()
 			.enqueue( caller_a.key(), path( 1 ), TestCall { sequence: 0, name: "a1-first" })
 			.enqueue( caller_b.key(), path( 3 ), TestCall { sequence: 3, name: "b1" })
@@ -471,9 +471,9 @@ mod tests {
 
 	#[test]
 	fn scheduler_chooses_the_oldest_eligible_destination() {
-		let caller = PluginGraph::new( Vec::new() );
-		let older = PluginGraph::new( Vec::new() );
-		let newer = PluginGraph::new( Vec::new() );
+		let caller = PluginNode::new( Vec::new() );
+		let older = PluginNode::new( Vec::new() );
+		let newer = PluginNode::new( Vec::new() );
 		let queues = HashMap::from([
 			( newer.key(), DestinationQueue::default().enqueue(
 				caller.key(), path( 1 ), TestCall { sequence: 2, name: "newer" },
@@ -489,7 +489,7 @@ mod tests {
 	fn execution_depth_follows_the_calling_plugin() {
 		let mut context = TestContext { resources: ResourceTable::new() };
 		let _ = context.resource_table();
-		let caller = PluginGraph::new( Vec::new() );
+		let caller = PluginNode::new( Vec::new() );
 		let scheduler = AsyncScheduler::<TestContext>::new( HashMap::from([( caller.key(), 2 )]) );
 		let root = scheduler.root_path();
 		let child = scheduler.execution_path( caller.key() );

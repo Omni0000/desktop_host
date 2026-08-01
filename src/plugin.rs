@@ -12,8 +12,8 @@ use wasmtime::component::{ Component, ResourceTable, Linker, Val };
 
 use crate::{ BindingAny, BindingAnyAsync };
 use crate::binding::ImportMetadata ;
-use crate::plugin_instance::{ AsyncInstanceRuntime, ExportEffects, PluginInstanceAsync, PluginInstanceSync };
-use crate::async_scheduler::{ PluginGraph, SchedulerSlot };
+use crate::plugin_instance::{ AsyncLinkage, ExportEffects, PluginInstanceAsync, PluginInstanceSync };
+use crate::async_scheduler::{ PluginNode, SchedulerSlot };
 use crate::Function ;
 use crate::Remap ;
 
@@ -296,9 +296,9 @@ where
 		Sockets::Item: Into<BindingAny<PluginId, Ctx>>,
 	{
 		let sockets = sockets.into_iter().map( Into::into ).collect::<Vec<_>>();
-		let graph = PluginGraph::new( sockets.iter().flat_map( BindingAny::graphs ).collect() );
+		let plugin_node = PluginNode::new( sockets.iter().flat_map( BindingAny::plugin_nodes ).collect() );
 		sockets.iter().try_for_each(| binding | binding.add_to_linker( &mut linker ))?;
-		self.instantiate_with_graph( engine, &linker, graph )
+		self.instantiate_with_node( engine, &linker, plugin_node )
 	}
 
 	/// Asynchronously links this plugin with its socket bindings and instantiates it.
@@ -358,12 +358,12 @@ where
 			});
 		}
 		let sockets = sockets.into_iter().map( Into::into ).collect::<Vec<_>>();
-		let graph = PluginGraph::new( sockets.iter().flat_map( BindingAnyAsync::graphs ).collect() );
+		let plugin_node = PluginNode::new( sockets.iter().flat_map( BindingAnyAsync::plugin_nodes ).collect() );
 		let scheduler_slot = SchedulerSlot::new();
 		sockets.iter().try_for_each(| binding |
-			binding.add_to_linker( &mut linker, graph.key(), &scheduler_slot, &import_asyncness )
+			binding.add_to_linker( &mut linker, plugin_node.key(), &scheduler_slot, &import_asyncness )
 		)?;
-		self.instantiate_async_with_graph( engine, &linker, graph, scheduler_slot ).await
+		self.instantiate_async_with_node( engine, &linker, plugin_node, scheduler_slot ).await
 	}
 
 	/// A convenience alias for [`Plugin::link`] with 0 sockets
@@ -375,14 +375,14 @@ where
 		engine: &Engine,
 		linker: &Linker<Ctx>
 	) -> Result<PluginInstanceSync<Ctx>, wasmtime::Error> {
-		self.instantiate_with_graph( engine, linker, PluginGraph::new( Vec::new() ))
+		self.instantiate_with_node( engine, linker, PluginNode::new( Vec::new() ))
 	}
 
-	fn instantiate_with_graph(
+	fn instantiate_with_node(
 		self,
 		engine: &Engine,
 		linker: &Linker<Ctx>,
-		graph: PluginGraph,
+		plugin_node: PluginNode,
 	) -> Result<PluginInstanceSync<Ctx>, wasmtime::Error> {
 		let export_effects = component_export_effects( &self.component, engine );
 		let mut store = Store::new( engine, self.context );
@@ -394,7 +394,7 @@ where
 			instance,
 			self.interface_remaps,
 			export_effects,
-			graph,
+			plugin_node,
 			self.fuel_limiter,
 			self.epoch_limiter,
 		))
@@ -433,19 +433,19 @@ where
 		engine: &Engine,
 		linker: &Linker<Ctx>,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
-		self.instantiate_async_with_graph(
+		self.instantiate_async_with_node(
 			engine,
 			linker,
-			PluginGraph::new( Vec::new() ),
+			PluginNode::new( Vec::new() ),
 			SchedulerSlot::new(),
 		).await
 	}
 
-	async fn instantiate_async_with_graph(
+	async fn instantiate_async_with_node(
 		self,
 		engine: &Engine,
 		linker: &Linker<Ctx>,
-		graph: PluginGraph,
+		plugin_node: PluginNode,
 		scheduler_slot: Arc<SchedulerSlot<Ctx>>,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
 		let export_effects = component_export_effects( &self.component, engine );
@@ -458,7 +458,7 @@ where
 			instance,
 			self.interface_remaps,
 			export_effects,
-			AsyncInstanceRuntime::new( graph, scheduler_slot ),
+			AsyncLinkage::new( plugin_node, scheduler_slot ),
 			self.fuel_limiter,
 			self.epoch_limiter,
 		))

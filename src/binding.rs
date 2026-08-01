@@ -46,7 +46,7 @@ where
 	interfaces: HashMap<String, Interface>,
 	plugins: PluginSockets<PluginId, Plugins, Instance>,
 	export_effects: HashMap<String, HashMap<String, bool>>,
-	graphs: Vec<crate::async_scheduler::PluginGraph>,
+	plugin_nodes: Vec<crate::async_scheduler::PluginNode>,
 }
 
 /// An abstract contract specifying what plugins must implement (via plugs) or what
@@ -155,10 +155,10 @@ where
 		plugins: Plugins,
 	) -> Self {
 		let package_name = package_name.into();
-		let mut graphs = Vec::new();
+		let mut plugin_nodes = Vec::new();
 		let mut export_effects = HashMap::<String, HashMap<String, bool>>::new();
 		let _ = plugins.map(| _, plugin | {
-			graphs.push( plugin.graph().clone() );
+			plugin_nodes.push( plugin.plugin_node().clone() );
 			for ( interface_name, interface ) in &interfaces {
 				for function_name in interface.function_names() {
 					if plugin.export_is_async( &package_name, interface_name, function_name ) {
@@ -173,7 +173,7 @@ where
 			interfaces,
 			plugins: plugins.map_mut(| plugin | Arc::new( Mutex::new( plugin ))),
 			export_effects,
-			graphs,
+			plugin_nodes,
 		}), std::marker::PhantomData )
 	}
 
@@ -369,7 +369,7 @@ where
 		let interface_name = interface_name.to_string();
 		let function_name = function_name.to_string();
 		let args = args.to_vec();
-		crate::async_scheduler::run( self.0.graphs.clone(), move | scheduler | async move {
+		crate::async_scheduler::run( self.0.plugin_nodes.clone(), move | scheduler | async move {
 			binding.dispatch_in_scheduler( &scheduler, &interface_name, &function_name, &args ).await
 		}).await
 	}
@@ -446,12 +446,12 @@ where
 	Ctx: PluginContext + 'static,
 	Instance: Send + 'static,
 {
-	pub(crate) fn graphs( &self ) -> Vec<crate::async_scheduler::PluginGraph> {
+	pub(crate) fn plugin_nodes( &self ) -> Vec<crate::async_scheduler::PluginNode> {
 		match self {
-			Self::ExactlyOne( binding ) => binding.0.graphs.clone(),
-			Self::AtMostOne( binding ) => binding.0.graphs.clone(),
-			Self::AtLeastOne( binding ) => binding.0.graphs.clone(),
-			Self::Any( binding ) => binding.0.graphs.clone(),
+			Self::ExactlyOne( binding ) => binding.0.plugin_nodes.clone(),
+			Self::AtMostOne( binding ) => binding.0.plugin_nodes.clone(),
+			Self::AtLeastOne( binding ) => binding.0.plugin_nodes.clone(),
+			Self::Any( binding ) => binding.0.plugin_nodes.clone(),
 		}
 	}
 }
@@ -490,14 +490,18 @@ where
 /// This can hold either a synchronous binding or an asynchronously dispatchable
 /// binding, allowing both kinds to appear in one socket list.
 #[derive( Debug )]
-pub enum BindingAnyAsync<PluginId, Ctx>
+pub struct BindingAnyAsync<PluginId, Ctx>( BindingAnyAsyncKind<PluginId, Ctx> )
+where
+	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+	Ctx: PluginContext + 'static;
+
+#[derive( Debug )]
+enum BindingAnyAsyncKind<PluginId, Ctx>
 where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
 	Ctx: PluginContext + 'static,
 {
-	/// A binding whose plugin instances are synchronously instantiated.
 	Sync( BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>> ),
-	/// A binding whose plugin instances support asynchronous dispatch.
 	Async( BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>> ),
 }
 
@@ -506,10 +510,10 @@ where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
 	Ctx: PluginContext + 'static,
 {
-	pub(crate) fn graphs( &self ) -> Vec<crate::async_scheduler::PluginGraph> {
-		match self {
-			Self::Sync( binding ) => binding.graphs(),
-			Self::Async( binding ) => binding.graphs(),
+	pub(crate) fn plugin_nodes( &self ) -> Vec<crate::async_scheduler::PluginNode> {
+		match &self.0 {
+			BindingAnyAsyncKind::Sync( binding ) => binding.plugin_nodes(),
+			BindingAnyAsyncKind::Async( binding ) => binding.plugin_nodes(),
 		}
 	}
 
@@ -520,9 +524,9 @@ where
 		scheduler_slot: &Arc<crate::async_scheduler::SchedulerSlot<Ctx>>,
 		imports: &ImportAsyncness,
 	) -> Result<(), wasmtime::Error> {
-		match self {
-			Self::Sync( binding ) => binding.add_to_linker_async( linker, imports ),
-			Self::Async( binding ) => binding.add_to_linker_async( linker, caller, scheduler_slot, imports ),
+		match &self.0 {
+			BindingAnyAsyncKind::Sync( binding ) => binding.add_to_linker_async( linker, imports ),
+			BindingAnyAsyncKind::Async( binding ) => binding.add_to_linker_async( linker, caller, scheduler_slot, imports ),
 		}
 	}
 }
@@ -536,7 +540,7 @@ where
 	BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>>: From<Binding<PluginId, Ctx, Plugins, PluginInstanceSync<Ctx>>>,
 {
 	fn from( binding: Binding<PluginId, Ctx, Plugins, PluginInstanceSync<Ctx>> ) -> Self {
-		Self::Sync( binding.into() )
+		Self( BindingAnyAsyncKind::Sync( binding.into() ))
 	}
 }
 
@@ -549,7 +553,7 @@ where
 	BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>>: From<Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>>>,
 {
 	fn from( binding: Binding<PluginId, Ctx, Plugins, PluginInstanceAsync<Ctx>> ) -> Self {
-		Self::Async( binding.into() )
+		Self( BindingAnyAsyncKind::Async( binding.into() ))
 	}
 }
 
@@ -558,7 +562,9 @@ where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
 	Ctx: PluginContext + 'static,
 {
-	fn from( binding: BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>> ) -> Self { Self::Sync( binding ) }
+	fn from( binding: BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>> ) -> Self {
+		Self( BindingAnyAsyncKind::Sync( binding ))
+	}
 }
 
 impl<PluginId, Ctx> From<BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>>> for BindingAnyAsync<PluginId, Ctx>
@@ -566,7 +572,9 @@ where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
 	Ctx: PluginContext + 'static,
 {
-	fn from( binding: BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>> ) -> Self { Self::Async( binding ) }
+	fn from( binding: BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>> ) -> Self {
+		Self( BindingAnyAsyncKind::Async( binding ))
+	}
 }
 
 impl<PluginId, Ctx> BindingAny<PluginId, Ctx, PluginInstanceAsync<Ctx>>
