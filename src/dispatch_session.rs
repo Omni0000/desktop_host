@@ -42,7 +42,7 @@ pub(crate) struct SessionShared {
 }
 
 impl SessionShared {
-	fn new() -> Arc<Self> {
+	pub(crate) fn new() -> Arc<Self> {
 		Arc::new( Self {
 			pending: StdMutex::new( Vec::new() ),
 			waker: AtomicWaker::new(),
@@ -50,18 +50,12 @@ impl SessionShared {
 	}
 
 	pub(crate) fn spawn( &self, task: BoxFuture<'static, ()> ) {
-		match self.pending.lock() {
-			Ok( mut pending ) => pending.push( task ),
-			Err( poisoned ) => poisoned.into_inner().push( task ),
-		}
+		self.pending.lock().unwrap_or_else( std::sync::PoisonError::into_inner ).push( task );
 		self.waker.wake();
 	}
 
 	fn take_pending( &self ) -> Vec<BoxFuture<'static, ()>> {
-		match self.pending.lock() {
-			Ok( mut pending ) => std::mem::take( &mut *pending ),
-			Err( poisoned ) => std::mem::take( &mut *poisoned.into_inner() ),
-		}
+		std::mem::take( &mut *self.pending.lock().unwrap_or_else( std::sync::PoisonError::into_inner ))
 	}
 }
 

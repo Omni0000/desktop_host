@@ -507,10 +507,11 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 		}).await;
 
 		if let Err( error ) = run_result {
+			let error = AsyncRuntimeError::StoreFailed( error.to_string() );
 			while let Ok( request ) = receiver.try_recv() {
-				let _ = request.response.send( Err( runtime_error( AsyncRuntimeError::StoreFailed( error.to_string() ))));
+				let _ = request.response.send( Err( runtime_error( error.clone() )));
 			}
-			return AsyncRuntimeError::StoreFailed( error.to_string() );
+			return error;
 		}
 		AsyncRuntimeError::DriverStopped
 	}

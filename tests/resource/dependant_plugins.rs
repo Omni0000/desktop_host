@@ -78,3 +78,35 @@ fn async_resource_test_wrapper() {
 		}
 	});
 }
+
+#[test]
+fn async_resource_graph_accepts_a_sync_plugin() {
+	futures::executor::block_on( async {
+		let engine = Engine::default();
+		let linker = Linker::new( &engine );
+		let plugins = fixtures::plugins( &engine );
+		let bindings = fixtures::bindings();
+		let counter = plugins.counter.plugin
+			.instantiate( &engine, &linker )
+			.expect( "Failed to instantiate synchronous counter plugin" );
+		let dependency = Binding::new(
+			bindings.dependency.package,
+			HashMap::from([( bindings.dependency.name, bindings.dependency.spec )]),
+			ExactlyOne( "_".to_string(), counter ),
+		);
+		let consumer = plugins.consumer.plugin
+			.link_async( &engine, linker, vec![ dependency ])
+			.await
+			.expect( "Failed to link consumer plugin asynchronously" );
+		let root = Binding::new(
+			bindings.root.package,
+			HashMap::from([( bindings.root.name, bindings.root.spec )]),
+			ExactlyOne( "_".to_string(), consumer ),
+		);
+
+		assert!( matches!(
+			root.dispatch( "root", "get-value", &[] ).await,
+			Ok( ExactlyOne( _, Ok( Val::U32( 42 )))),
+		));
+	});
+}

@@ -50,6 +50,9 @@ fn async_debug_output_exposes_configuration_without_component_internals() -> Res
 		let plugin_instance = plugins.plugin.plugin.instantiate_async( &engine, &linker ).await?;
 		let instance_debug = format!( "{plugin_instance:?}" );
 		assert!( instance_debug.contains( "state: \"<session-managed async store>\"" ));
+		let sync_instance = fixtures::plugins( &engine ).plugin.plugin.instantiate( &engine, &linker )?;
+		let sync_instance = PluginInstanceAsync::from( sync_instance );
+		assert!( format!( "{sync_instance:?}" ).contains( "state: \"<session-managed sync store>\"" ));
 		let binding: Binding<
 			String,
 			TestContext,

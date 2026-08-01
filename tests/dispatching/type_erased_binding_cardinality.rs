@@ -11,7 +11,8 @@ fixtures! {
 }
 
 #[test]
-fn links_each_type_erased_binding_cardinality() -> Result<(), wasmtime::Error> {
+fn sync_type_erased_bindings_link_to_sync_and_async_plugins() -> Result<(), Box<dyn std::error::Error>> {
+	futures::executor::block_on( async {
 	let engine = Engine::default();
 
 	let bindings = fixtures::bindings();
@@ -25,6 +26,8 @@ fn links_each_type_erased_binding_cardinality() -> Result<(), wasmtime::Error> {
 	let socket = binding.into_any();
 	let plugin = fixtures::plugins( &engine ).plugin.plugin;
 	let _ = plugin.link( &engine, Linker::new( &engine ), vec![ socket.clone() ])?;
+	let plugin = fixtures::plugins( &engine ).plugin.plugin;
+	let _ = plugin.link_async( &engine, Linker::new( &engine ), vec![ socket ]).await?;
 
 	let bindings = fixtures::bindings();
 	let binding: Binding<String, TestContext, AtMostOne<String, PluginInstanceSync<TestContext>>> = Binding::new(
@@ -35,6 +38,8 @@ fn links_each_type_erased_binding_cardinality() -> Result<(), wasmtime::Error> {
 	let socket = binding.into_any();
 	let plugin = fixtures::plugins( &engine ).plugin.plugin;
 	let _ = plugin.link( &engine, Linker::new( &engine ), vec![ socket.clone() ])?;
+	let plugin = fixtures::plugins( &engine ).plugin.plugin;
+	let _ = plugin.link_async( &engine, Linker::new( &engine ), vec![ socket ]).await?;
 
 	let bindings = fixtures::bindings();
 	let instance = fixtures::plugins( &engine ).plugin.plugin
@@ -47,6 +52,8 @@ fn links_each_type_erased_binding_cardinality() -> Result<(), wasmtime::Error> {
 	let socket = binding.into_any();
 	let plugin = fixtures::plugins( &engine ).plugin.plugin;
 	let _ = plugin.link( &engine, Linker::new( &engine ), vec![ socket.clone() ])?;
+	let plugin = fixtures::plugins( &engine ).plugin.plugin;
+	let _ = plugin.link_async( &engine, Linker::new( &engine ), vec![ socket ]).await?;
 
 	let bindings = fixtures::bindings();
 	let binding: Binding<String, TestContext, Any<String, PluginInstanceSync<TestContext>>> = Binding::new(
@@ -57,7 +64,10 @@ fn links_each_type_erased_binding_cardinality() -> Result<(), wasmtime::Error> {
 	let socket = binding.into_any();
 	let plugin = fixtures::plugins( &engine ).plugin.plugin;
 	let _ = plugin.link( &engine, Linker::new( &engine ), vec![ socket.clone() ])?;
+	let plugin = fixtures::plugins( &engine ).plugin.plugin;
+	let _ = plugin.link_async( &engine, Linker::new( &engine ), vec![ socket ]).await?;
 	Ok(())
+	})
 }
 
 #[test]
