@@ -142,7 +142,8 @@ fully synchronous graph. Use `instantiate_async`, `link_async`, and
 synchronous instance can also be placed in an async binding by converting it
 with `PluginInstanceAsync::from`/`Into`; it remains a synchronous Wasmtime
 instance. `Function` only describes routing and return-value handling—wasm-link
-reads Component Model async effects from the compiled components while linking.
+reads each importing component's function types while linking and registers the
+matching Wasmtime host function.
 
 One dispatch future cooperatively drives the whole graph. It does not create
 worker threads and does not require an executor argument. Calls in one dispatch
@@ -155,8 +156,9 @@ calling plugins and then between their execution paths so one call-heavy branch
 cannot starve another.
 
 Dropping a dispatch releases its graph so a later session can drive the store.
-Already-admitted Wasmtime calls are cancelled when that store is next driven;
-they are discarded before any calls from the later session are admitted.
+Already-admitted Wasmtime calls remain suspended rather than having their
+futures discarded; they can finish or receive a runtime error when the store is
+next driven.
 
 ## Plugin Error ABI
 

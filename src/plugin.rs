@@ -6,14 +6,12 @@
 //! the plugin expects to import from other plugins.
 
 use std::collections::HashMap ;
-use std::sync::Arc;
 use wasmtime::{ Engine, Store };
 use wasmtime::component::{ Component, ResourceTable, Linker, Val };
 
 use crate::{ BindingAny, BindingAnyAsync };
 use crate::binding::ImportMetadata ;
-use crate::plugin_instance::{ AsyncLinkage, ExportEffects, PluginInstanceAsync, PluginInstanceSync };
-use crate::async_scheduler::{ PluginNode, SchedulerSlot };
+use crate::plugin_instance::{ AsyncLinkage, PluginInstanceAsync, PluginInstanceSync };
 use crate::Function ;
 use crate::Remap ;
 
@@ -296,9 +294,8 @@ where
 		Sockets::Item: Into<BindingAny<PluginId, Ctx>>,
 	{
 		let sockets = sockets.into_iter().map( Into::into ).collect::<Vec<_>>();
-		let plugin_node = PluginNode::new( sockets.iter().flat_map( BindingAny::plugin_nodes ).collect() );
 		sockets.iter().try_for_each(| binding | binding.add_to_linker( &mut linker ))?;
-		self.instantiate_with_node( engine, &linker, plugin_node )
+		self.instantiate_with_linker( engine, &linker )
 	}
 
 	/// Asynchronously links this plugin with its socket bindings and instantiates it.
@@ -358,12 +355,11 @@ where
 			});
 		}
 		let sockets = sockets.into_iter().map( Into::into ).collect::<Vec<_>>();
-		let plugin_node = PluginNode::new( sockets.iter().flat_map( BindingAnyAsync::plugin_nodes ).collect() );
-		let scheduler_slot = SchedulerSlot::new();
+		let linkage = AsyncLinkage::new();
 		sockets.iter().try_for_each(| binding |
-			binding.add_to_linker( &mut linker, plugin_node.key(), &scheduler_slot, &import_asyncness )
+			binding.add_to_linker( &mut linker, linkage.active_calls(), &import_asyncness )
 		)?;
-		self.instantiate_async_with_node( engine, &linker, plugin_node, scheduler_slot ).await
+		self.instantiate_async_with_linkage( engine, &linker, linkage ).await
 	}
 
 	/// A convenience alias for [`Plugin::link`] with 0 sockets
@@ -375,16 +371,14 @@ where
 		engine: &Engine,
 		linker: &Linker<Ctx>
 	) -> Result<PluginInstanceSync<Ctx>, wasmtime::Error> {
-		self.instantiate_with_node( engine, linker, PluginNode::new( Vec::new() ))
+		self.instantiate_with_linker( engine, linker )
 	}
 
-	fn instantiate_with_node(
+	fn instantiate_with_linker(
 		self,
 		engine: &Engine,
 		linker: &Linker<Ctx>,
-		plugin_node: PluginNode,
 	) -> Result<PluginInstanceSync<Ctx>, wasmtime::Error> {
-		let export_effects = component_export_effects( &self.component, engine );
 		let mut store = Store::new( engine, self.context );
 		if let Some( fuel ) = self.initial_fuel { store.set_fuel( fuel )?; }
 		if let Some( limiter ) = self.memory_limiter { store.limiter( limiter ); }
@@ -393,8 +387,6 @@ where
 			store,
 			instance,
 			self.interface_remaps,
-			export_effects,
-			plugin_node,
 			self.fuel_limiter,
 			self.epoch_limiter,
 		))
@@ -433,22 +425,19 @@ where
 		engine: &Engine,
 		linker: &Linker<Ctx>,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
-		self.instantiate_async_with_node(
+		self.instantiate_async_with_linkage(
 			engine,
 			linker,
-			PluginNode::new( Vec::new() ),
-			SchedulerSlot::new(),
+			AsyncLinkage::new(),
 		).await
 	}
 
-	async fn instantiate_async_with_node(
+	async fn instantiate_async_with_linkage(
 		self,
 		engine: &Engine,
 		linker: &Linker<Ctx>,
-		plugin_node: PluginNode,
-		scheduler_slot: Arc<SchedulerSlot<Ctx>>,
+		linkage: AsyncLinkage<Ctx>,
 	) -> Result<PluginInstanceAsync<Ctx>, wasmtime::Error> {
-		let export_effects = component_export_effects( &self.component, engine );
 		let mut store = Store::new( engine, self.context );
 		if let Some( fuel ) = self.initial_fuel { store.set_fuel( fuel )?; }
 		if let Some( limiter ) = self.memory_limiter { store.limiter( limiter ); }
@@ -457,28 +446,12 @@ where
 			store,
 			instance,
 			self.interface_remaps,
-			export_effects,
-			AsyncLinkage::new( plugin_node, scheduler_slot ),
+			linkage,
 			self.fuel_limiter,
 			self.epoch_limiter,
 		))
 	}
 
-}
-
-fn component_export_effects( component: &Component, engine: &Engine ) -> ExportEffects {
-	component.component_type().exports( engine ).filter_map(|( interface, export )| {
-		let wasmtime::component::types::ComponentItem::ComponentInstance( instance ) = export.ty else {
-			return None;
-		};
-		let functions = instance.exports( engine ).filter_map(|( name, export )| match export.ty {
-			wasmtime::component::types::ComponentItem::ComponentFunc( function ) =>
-				Some(( name.to_string(), function.async_() )),
-			_ => None,
-		}).collect();
-		let interface = export.implements.unwrap_or( interface );
-		Some(( unversioned( interface ).to_string(), functions ))
-	}).collect()
 }
 
 fn unversioned( interface: &str ) -> &str {

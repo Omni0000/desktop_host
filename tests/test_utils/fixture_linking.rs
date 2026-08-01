@@ -215,7 +215,7 @@ mod fixture_linking {
 	fn has_resource( resolve: &wit_parser::Resolve, wit_type: wit_parser::Type ) -> Result<bool, FixtureError> {
 		Ok( match wit_type {
 			wit_parser::Type::Id( id ) => match &resolve.types.get( id )
-				.ok_or_else(|| FixtureError::UndeclaredType( id ))?
+				.ok_or( FixtureError::UndeclaredType( id ))?
 				.kind
 			{
 				wit_parser::TypeDefKind::Resource

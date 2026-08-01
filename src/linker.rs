@@ -295,7 +295,7 @@ where
 	PluginId: Clone + std::hash::Hash + Eq + Send + Sync + 'static,
 	Ctx: PluginContext,
 {
-	let instance = plugin.lock().await.clone();
+	let instance = plugin.lock().await.handle();
 	let result = instance.dispatch_async(
 		dispatch,
 		target.package_name,
@@ -326,7 +326,7 @@ where
 	PluginId: Clone + std::hash::Hash + Eq + Send + Sync + 'static,
 	Ctx: PluginContext,
 {
-	let instance = plugin.lock().await.clone();
+	let instance = plugin.lock().await.handle();
 	let result = instance.dispatch_async(
 		dispatch,
 		target.package_name,

@@ -11,7 +11,7 @@ use wasmtime::component::{ Linker, Val };
 
 use crate::{ Interface, PluginContext };
 use crate::cardinality::{ Any, AtLeastOne, AtMostOne, Cardinality, ExactlyOne };
-use crate::plugin_instance::{ InstanceMetadata, PluginInstanceAsync, PluginInstanceSync };
+use crate::plugin_instance::{ PluginInstanceAsync, PluginInstanceSync };
 
 pub(crate) type ImportAsyncness = HashMap<String, ImportMetadata>;
 
@@ -45,8 +45,6 @@ where
 	package_name: String,
 	interfaces: HashMap<String, Interface>,
 	plugins: PluginSockets<PluginId, Plugins, Instance>,
-	export_effects: HashMap<String, HashMap<String, bool>>,
-	plugin_nodes: Vec<crate::async_scheduler::PluginNode>,
 }
 
 /// An abstract contract specifying what plugins must implement (via plugs) or what
@@ -138,12 +136,11 @@ where
 	}
 }
 
-#[allow( private_bounds )]
 impl<PluginId, Ctx, Plugins, Instance> Binding<PluginId, Ctx, Plugins, Instance>
 where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
 	Ctx: PluginContext + 'static,
-	Instance: InstanceMetadata + Send + 'static,
+	Instance: Send + 'static,
 	Plugins: Cardinality<PluginId, Instance> + 'static,
 	PluginSockets<PluginId, Plugins, Instance>: Cardinality<PluginId, Arc<Mutex<Instance>>> + Send + Sync,
 {
@@ -155,25 +152,10 @@ where
 		plugins: Plugins,
 	) -> Self {
 		let package_name = package_name.into();
-		let mut plugin_nodes = Vec::new();
-		let mut export_effects = HashMap::<String, HashMap<String, bool>>::new();
-		let _ = plugins.map(| _, plugin | {
-			plugin_nodes.push( plugin.plugin_node().clone() );
-			for ( interface_name, interface ) in &interfaces {
-				for function_name in interface.function_names() {
-					if plugin.export_is_async( &package_name, interface_name, function_name ) {
-						export_effects.entry( interface_name.clone() ).or_default()
-							.insert( function_name.to_string(), true );
-					}
-				}
-			}
-		});
 		Self( Arc::new( BindingData {
 			package_name,
 			interfaces,
 			plugins: plugins.map_mut(| plugin | Arc::new( Mutex::new( plugin ))),
-			export_effects,
-			plugin_nodes,
 		}), std::marker::PhantomData )
 	}
 
@@ -183,12 +165,6 @@ where
 
 	pub(crate) fn package_name( &self ) -> &str { &self.0.package_name }
 
-	pub(crate) fn export_is_async( &self, interface_name: &str, function_name: &str ) -> bool {
-		self.0.export_effects.get( interface_name )
-			.and_then(| functions | functions.get( function_name ))
-			.copied()
-			.unwrap_or( false )
-	}
 }
 
 impl<PluginId, Ctx, Plugins> Binding<PluginId, Ctx, Plugins, PluginInstanceSync<Ctx>>
@@ -289,8 +265,7 @@ where
 	pub(crate) fn add_to_linker_async(
 		binding: &Self,
 		linker: &mut Linker<Ctx>,
-		caller: crate::async_scheduler::PluginKey,
-		scheduler_slot: &Arc<crate::async_scheduler::SchedulerSlot<Ctx>>,
+		active_calls: &crate::async_scheduler::ActiveCalls<Ctx>,
 		imports: &ImportAsyncness,
 	) -> Result<(), wasmtime::Error>
 	where
@@ -306,7 +281,7 @@ where
 				linker_name,
 				name,
 				binding,
-				&crate::async_scheduler::LinkDispatchContext::new( caller, scheduler_slot ),
+				&crate::async_scheduler::LinkDispatchContext::new( active_calls ),
 				import.map(| import | &import.functions ),
 			)
 		})
@@ -369,7 +344,7 @@ where
 		let interface_name = interface_name.to_string();
 		let function_name = function_name.to_string();
 		let args = args.to_vec();
-		crate::async_scheduler::run( self.0.plugin_nodes.clone(), move | scheduler | async move {
+		crate::async_scheduler::run( move | scheduler | async move {
 			binding.dispatch_in_scheduler( &scheduler, &interface_name, &function_name, &args ).await
 		}).await
 	}
@@ -395,7 +370,7 @@ where
 		let function = function.clone();
 		let args = args.to_vec();
 		let caller = scheduler.origin();
-		let path = scheduler.root_path();
+		let path = crate::async_scheduler::ExecutionPathId::ROOT;
 
 		Ok( self.0.plugins.map_async(| _, plugin | {
 			let package_name = package_name.clone();
@@ -405,7 +380,7 @@ where
 			let args = args.clone();
 			let scheduler = scheduler.clone();
 			async move {
-				let instance = plugin.lock().await.clone();
+				let instance = plugin.lock().await.handle();
 				instance.dispatch_async(
 					crate::async_scheduler::DispatchContext::new( &scheduler, caller, path ),
 					&package_name,
@@ -446,14 +421,6 @@ where
 	Ctx: PluginContext + 'static,
 	Instance: Send + 'static,
 {
-	pub(crate) fn plugin_nodes( &self ) -> Vec<crate::async_scheduler::PluginNode> {
-		match self {
-			Self::ExactlyOne( binding ) => binding.0.plugin_nodes.clone(),
-			Self::AtMostOne( binding ) => binding.0.plugin_nodes.clone(),
-			Self::AtLeastOne( binding ) => binding.0.plugin_nodes.clone(),
-			Self::Any( binding ) => binding.0.plugin_nodes.clone(),
-		}
-	}
 }
 
 impl<PluginId, Ctx> BindingAny<PluginId, Ctx, PluginInstanceSync<Ctx>>
@@ -510,23 +477,15 @@ where
 	PluginId: std::hash::Hash + Eq + Clone + Send + Sync + Into<Val> + 'static,
 	Ctx: PluginContext + 'static,
 {
-	pub(crate) fn plugin_nodes( &self ) -> Vec<crate::async_scheduler::PluginNode> {
-		match &self.0 {
-			BindingAnyAsyncKind::Sync( binding ) => binding.plugin_nodes(),
-			BindingAnyAsyncKind::Async( binding ) => binding.plugin_nodes(),
-		}
-	}
-
 	pub(crate) fn add_to_linker(
 		&self,
 		linker: &mut Linker<Ctx>,
-		caller: crate::async_scheduler::PluginKey,
-		scheduler_slot: &Arc<crate::async_scheduler::SchedulerSlot<Ctx>>,
+		active_calls: &crate::async_scheduler::ActiveCalls<Ctx>,
 		imports: &ImportAsyncness,
 	) -> Result<(), wasmtime::Error> {
 		match &self.0 {
 			BindingAnyAsyncKind::Sync( binding ) => binding.add_to_linker_async( linker, imports ),
-			BindingAnyAsyncKind::Async( binding ) => binding.add_to_linker_async( linker, caller, scheduler_slot, imports ),
+			BindingAnyAsyncKind::Async( binding ) => binding.add_to_linker_async( linker, active_calls, imports ),
 		}
 	}
 }
@@ -585,15 +544,14 @@ where
 	pub(crate) fn add_to_linker_async(
 		&self,
 		linker: &mut Linker<Ctx>,
-		caller: crate::async_scheduler::PluginKey,
-		scheduler_slot: &Arc<crate::async_scheduler::SchedulerSlot<Ctx>>,
+		active_calls: &crate::async_scheduler::ActiveCalls<Ctx>,
 		imports: &ImportAsyncness,
 	) -> Result<(), wasmtime::Error> {
 		match self {
-			Self::ExactlyOne( binding ) => Binding::add_to_linker_async( binding, linker, caller, scheduler_slot, imports ),
-			Self::AtMostOne( binding ) => Binding::add_to_linker_async( binding, linker, caller, scheduler_slot, imports ),
-			Self::AtLeastOne( binding ) => Binding::add_to_linker_async( binding, linker, caller, scheduler_slot, imports ),
-			Self::Any( binding ) => Binding::add_to_linker_async( binding, linker, caller, scheduler_slot, imports ),
+			Self::ExactlyOne( binding ) => Binding::add_to_linker_async( binding, linker, active_calls, imports ),
+			Self::AtMostOne( binding ) => Binding::add_to_linker_async( binding, linker, active_calls, imports ),
+			Self::AtLeastOne( binding ) => Binding::add_to_linker_async( binding, linker, active_calls, imports ),
+			Self::Any( binding ) => Binding::add_to_linker_async( binding, linker, active_calls, imports ),
 		}
 	}
 }

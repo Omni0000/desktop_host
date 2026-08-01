@@ -1,7 +1,6 @@
 use std::sync::Arc ;
 use std::collections::{ HashMap, HashSet };
 use futures::lock::Mutex ;
-use thiserror::Error ;
 use wasmtime::{ AsContextMut, component::{ Linker, ResourceType, Val }};
 
 use crate::{ Binding, PluginContext, PluginInstanceAsync, PluginInstanceSync };
@@ -16,12 +15,6 @@ use crate::linker::{
 	dispatch_method_async_sync,
 };
 use crate::resource_wrapper::ResourceWrapper ;
-
-#[derive( Debug, Error )]
-enum LinkError {
-	#[error( "synchronously instantiated plugin exposes async export `{interface}.{function}`" )]
-	SyncInstanceAsyncExport { interface: String, function: String },
-}
 
 /// A single WIT interface within a [`Binding`].
 ///
@@ -68,10 +61,6 @@ impl Interface {
 	#[inline]
 	pub(crate) fn function( &self, name: &str ) -> Option<&Function> {
 		self.functions.get( name )
-	}
-
-	pub(crate) fn function_names( &self ) -> impl Iterator<Item = &str> {
-		self.functions.keys().map( String::as_str )
 	}
 
 	#[inline]
@@ -145,13 +134,6 @@ impl Interface {
 		let package_name = binding.package_name();
 
 		self.functions.iter().try_for_each(|( name, metadata )| {
-			let destination_is_async = binding.export_is_async( interface_name, name );
-			if destination_is_async {
-				return Err( LinkError::SyncInstanceAsyncExport {
-					interface: interface_ident.to_string(),
-					function: name.clone(),
-				}.into() );
-			}
 			let import_is_async = imports.and_then(| functions | functions.get( name )).copied().unwrap_or( false );
 			let package_name = package_name.to_string();
 			let interface_name = interface_name.to_string();
@@ -234,8 +216,7 @@ impl Interface {
 		let mut linker_root = linker.root();
 		let mut linker_instance = linker_root.instance( interface_ident )?;
 		let package_name = binding.package_name();
-		let caller = dispatch.caller;
-		let scheduler_slot = dispatch.scheduler_slot;
+		let active_calls = dispatch.calls;
 
 		self.functions.iter().try_for_each(|( name, metadata )| {
 			let import_is_async = imports.and_then(| functions | functions.get( name )).copied().unwrap_or( false );
@@ -246,22 +227,23 @@ impl Interface {
 			let function = metadata.clone();
 
 			macro_rules! link_concurrent {( $dispatch: expr ) => {{
-				let caller = caller;
-				let scheduler_slot = Arc::clone( scheduler_slot );
+				let active_calls = Arc::clone( active_calls );
 				linker_instance.func_new_concurrent( name, move | ctx, _ty, args, results | {
 					let package_name = package_name.clone();
 					let interface_name = interface_name.clone();
 					let binding = binding.clone();
 					let function_name = function_name.clone();
 					let function = function.clone();
-					let caller = caller;
-					let scheduler_slot = Arc::clone( &scheduler_slot );
+					let active_calls = Arc::clone( &active_calls );
 					Box::pin( async move {
-						let scheduler = scheduler_slot.require()?;
-						let path = scheduler.execution_path( caller );
+						let active = ctx.with(| mut access | {
+							let task = access.as_context_mut().async_call_stack()?
+								.last().ok_or( crate::async_scheduler::SchedulerUnavailable::MissingGuestTask )?;
+							Ok::<_, wasmtime::Error>( crate::async_scheduler::active_call( &active_calls, task )? )
+						})?;
 						let target = DispatchTarget::new( &package_name, &interface_name, &function_name, &function );
 						results[0] = $dispatch(
-							&binding, &scheduler, caller, path, ctx, &target, args,
+							&binding, &active.scheduler, active.caller, active.path, ctx, &target, args,
 						).await;
 						Ok(())
 					})
@@ -269,22 +251,22 @@ impl Interface {
 			}}}
 
 			macro_rules! link_sync {( $dispatch: expr ) => {{
-				let caller = caller;
-				let scheduler_slot = Arc::clone( scheduler_slot );
+				let active_calls = Arc::clone( active_calls );
 				linker_instance.func_new_async( name, move | ctx, _ty, args, results | {
 					let package_name = package_name.clone();
 					let interface_name = interface_name.clone();
 					let binding = binding.clone();
 					let function_name = function_name.clone();
 					let function = function.clone();
-					let caller = caller;
-					let scheduler_slot = Arc::clone( &scheduler_slot );
+					let active_calls = Arc::clone( &active_calls );
 					Box::new( async move {
-						let scheduler = scheduler_slot.require()?;
-						let path = scheduler.execution_path( caller );
+						let mut ctx = ctx;
+						let task = ctx.async_call_stack()?.last()
+							.ok_or( crate::async_scheduler::SchedulerUnavailable::MissingGuestTask )?;
+						let active = crate::async_scheduler::active_call( &active_calls, task )?;
 						let target = DispatchTarget::new( &package_name, &interface_name, &function_name, &function );
 						results[0] = $dispatch(
-							&binding, &scheduler, caller, path, ctx, &target, args,
+							&binding, &active.scheduler, active.caller, active.path, ctx, &target, args,
 						).await;
 						Ok(())
 					})
@@ -325,8 +307,8 @@ pub enum FunctionKind {
 /// Metadata about a function declared by an interface.
 ///
 /// Provides routing and return-value information for cross-plugin dispatch.
-/// Asyncness is read from the source import and destination exports at link time;
-/// it is not part of binding metadata.
+/// Asyncness is read from the importing component at link time; it is not part
+/// of binding metadata.
 #[derive( Debug, Clone )]
 pub struct Function {
 	/// Whether this function is freestanding or a resource method.

@@ -24,10 +24,6 @@ enum TestHostError {
 	#[error( "host wait release was dropped" )] ReleaseDropped,
 }
 
-#[derive( Debug, thiserror::Error )]
-#[error( "a synchronous import unexpectedly linked to an async export" )]
-struct ExpectedLinkError;
-
 fn test_engine() -> Result<Engine, wasmtime::Error> {
 	let mut config = wasmtime::Config::new();
 	config.wasm_component_model_implements( true );
@@ -136,7 +132,7 @@ fn async_binding_accepts_a_sync_plugin_instance() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn async_export_effects_remain_available_after_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+fn a_shared_async_dependency_remains_dispatchable_across_sessions() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
 		let engine = test_engine()?;
 		let plugins = fixtures::plugins( &engine );
@@ -189,7 +185,7 @@ fn sync_import_accepts_an_async_export() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn sync_instance_with_an_async_export_is_rejected_by_exact_name() -> Result<(), Box<dyn std::error::Error>> {
+fn async_linking_does_not_infer_effects_from_sync_instance_exports() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
 		let engine = test_engine()?;
 		let plugins = fixtures::plugins( &engine );
@@ -200,13 +196,8 @@ fn sync_instance_with_an_async_export_is_rejected_by_exact_name() -> Result<(), 
 			HashMap::from([( bindings.dependency.name, bindings.dependency.spec )]),
 			ExactlyOne( "_".to_string(), child ),
 		);
-		let result = plugins.startup.plugin
-			.link_async( &engine, Linker::new( &engine ), vec![ dependency ]).await;
-		let Err( error ) = result else { return Err( ExpectedLinkError.into() )};
-		assert_eq!(
-			error.to_string(),
-			"synchronously instantiated plugin exposes async export `child.get-value`",
-		);
+		let _ = plugins.startup.plugin
+			.link_async( &engine, Linker::new( &engine ), vec![ dependency ]).await?;
 		Ok(())
 	})
 }
@@ -215,27 +206,33 @@ fn sync_instance_with_an_async_export_is_rejected_by_exact_name() -> Result<(), 
 fn independent_sessions_sharing_a_graph_are_serialized() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
 		let engine = test_engine()?;
-		let plugins = fixtures::plugins( &engine );
-		let bindings = fixtures::bindings();
-		let child = plugins.child.plugin.instantiate_async( &engine, &Linker::new( &engine )).await?;
-		let dependency = Binding::new(
-			bindings.dependency.package,
-			HashMap::from([( bindings.dependency.name, bindings.dependency.spec )]),
-			ExactlyOne( "_".to_string(), child ),
+		let calls = Arc::new( AtomicUsize::new( 0 ));
+		let ( release_first, first_wait ) = futures::channel::oneshot::channel();
+		let ( release_second, second_wait ) = futures::channel::oneshot::channel();
+		let linker = suspending_linker(
+			&engine,
+			VecDeque::from([ first_wait, second_wait ]),
+			Arc::clone( &calls ),
+		)?;
+		let instance = fixtures::plugins( &engine ).suspending.plugin
+			.instantiate_async( &engine, &linker ).await?;
+		let binding = Binding::new(
+			"test:plugin",
+			HashMap::from([( "root".to_string(), suspending_interface() )]),
+			ExactlyOne( "plugin".to_string(), instance ),
 		);
-		let startup = plugins.startup.plugin
-			.link_async( &engine, Linker::new( &engine ), vec![ dependency ]).await?;
-		let root = Binding::new(
-			bindings.root.package,
-			HashMap::from([( bindings.root.name, bindings.root.spec )]),
-			ExactlyOne( "_".to_string(), startup ),
-		);
-		let ( first, second ) = futures::join!(
-			root.dispatch( "root", "get-primitive", &[] ),
-			root.dispatch( "root", "get-primitive", &[] ),
-		);
-		assert_u32( &first, 42 );
-		assert_u32( &second, 42 );
+		let mut first = Box::pin( binding.dispatch( "root", "get-value", &[] ));
+		let mut second = Box::pin( binding.dispatch( "root", "get-value", &[] ));
+		poll_until_calls( first.as_mut(), &calls, 1 );
+		let waker = futures::task::noop_waker();
+		let mut context = Context::from_waker( &waker );
+		assert!( second.as_mut().poll( &mut context ).is_pending() );
+		assert_eq!( calls.load( Ordering::SeqCst ), 1, "second session entered the busy plugin" );
+		assert!( release_first.send(()).is_ok(), "first host wait was dropped" );
+		assert_u32( &first.await, 42 );
+		poll_until_calls( second.as_mut(), &calls, 2 );
+		assert!( release_second.send(()).is_ok(), "second host wait was dropped" );
+		assert_u32( &second.await, 42 );
 		Ok(())
 	})
 }
@@ -274,7 +271,7 @@ fn dropping_a_dispatch_releases_the_graph_for_the_next_session() -> Result<(), B
 }
 
 #[test]
-fn one_session_keeps_multiple_shared_plugin_calls_suspended() -> Result<(), Box<dyn std::error::Error>> {
+fn one_session_keeps_multiple_plugin_calls_suspended() -> Result<(), Box<dyn std::error::Error>> {
 	futures::executor::block_on( async {
 		let engine = test_engine()?;
 		let calls = Arc::new( AtomicUsize::new( 0 ));
@@ -285,14 +282,16 @@ fn one_session_keeps_multiple_shared_plugin_calls_suspended() -> Result<(), Box<
 			VecDeque::from([ first, second ]),
 			Arc::clone( &calls ),
 		)?;
-		let instance = fixtures::plugins( &engine ).suspending.plugin
+		let first_instance = fixtures::plugins( &engine ).suspending.plugin
+			.instantiate_async( &engine, &linker ).await?;
+		let second_instance = fixtures::plugins( &engine ).suspending.plugin
 			.instantiate_async( &engine, &linker ).await?;
 		let binding = Binding::new(
 			"test:plugin",
 			HashMap::from([( "root".to_string(), suspending_interface() )]),
 			Any( HashMap::from([
-				( "first".to_string(), instance.clone() ),
-				( "second".to_string(), instance ),
+				( "first".to_string(), first_instance ),
+				( "second".to_string(), second_instance ),
 			])),
 		);
 
