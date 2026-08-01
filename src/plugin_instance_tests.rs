@@ -63,7 +63,7 @@ fn closed_scheduler_rejects_a_call_with_the_exact_cancellation_error() -> Result
 }
 
 #[test]
-fn attached_driver_records_its_exact_terminal_error() -> Result<(), Box<dyn std::error::Error>> {
+fn attached_driver_records_its_exact_terminal_error() {
 	let expected = AsyncRuntimeError::StoreFailed( "expected".to_string() );
 	let ( sender, _receiver ) = futures::channel::mpsc::unbounded();
 	let inner = native_inner( sender, DriverState::Attached );
@@ -80,7 +80,6 @@ fn attached_driver_records_its_exact_terminal_error() -> Result<(), Box<dyn std:
 	assert!( driver.as_mut().poll( &mut context ).is_ready() );
 	let state = inner.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
 	assert!( matches!( &*state, DriverState::Failed( error ) if error == &expected ));
-	Ok(())
 }
 
 #[test]
