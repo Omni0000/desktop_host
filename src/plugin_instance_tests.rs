@@ -6,9 +6,10 @@ use wasmtime::component::{ Component, FutureReader, Linker, ResourceTable, Strea
 
 use super::{
 	AsyncInstanceInner, AsyncLinkage, AsyncRequest, AsyncRuntimeError, AttachedDriver, DriverMessage,
-	DriverState, PluginInstanceAsync, PluginState, ensure_supported_value, receive_response,
+	DriverState, PendingSession, PluginInstanceAsync, PluginState, ensure_supported_value,
+	fail_active_calls, receive_response,
 };
-use crate::async_scheduler::{ ActiveCalls, AsyncScheduler, DispatchContext, PluginKey };
+use crate::async_scheduler::{ ActiveCall, ActiveCallRecord, ActiveCalls, AsyncScheduler, DispatchContext, PluginKey };
 use crate::{ DispatchError, Function, FunctionKind, PluginContext, ReturnKind };
 
 struct Context { table: ResourceTable }
@@ -43,6 +44,84 @@ fn failed_driver_rejects_later_calls_with_the_exact_error() -> Result<(), Box<dy
 	let ( request, result ) = request( "get-value" );
 	inner.enqueue( &AsyncScheduler::testing(), request );
 	assert_runtime_error( futures::executor::block_on( result )?, &expected )
+}
+
+#[test]
+fn waiting_calls_from_one_session_share_a_queue_and_receive_the_same_failure() -> Result<(), Box<dyn std::error::Error>> {
+	let owner = AsyncScheduler::<Context>::testing();
+	let waiting = AsyncScheduler::<Context>::testing();
+	let ( sender, _receiver ) = futures::channel::mpsc::unbounded();
+	let inner = native_inner( sender, DriverState::Attached {
+		owner: owner.session_id(),
+		waiting: std::collections::VecDeque::new(),
+	});
+	let ( first, first_result ) = request( "get-value" );
+	let ( second, second_result ) = request( "get-value" );
+	inner.enqueue( &waiting, first );
+	inner.enqueue( &waiting, second );
+	{
+		let driver = inner.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
+		let DriverState::Attached { waiting, .. } = &*driver else { return Err( "driver was not attached".into() )};
+		assert_eq!( waiting.len(), 1 );
+		assert_eq!( waiting[0].requests.len(), 2 );
+	}
+	let expected = AsyncRuntimeError::StoreFailed( "expected".to_string() );
+	inner.fail( &expected );
+	assert_runtime_error( futures::executor::block_on( first_result )?, &expected )?;
+	assert_runtime_error( futures::executor::block_on( second_result )?, &expected )
+}
+
+#[test]
+fn failing_an_idle_driver_records_the_exact_terminal_error() {
+	let expected = AsyncRuntimeError::StoreFailed( "expected".to_string() );
+	let ( sender, _receiver ) = futures::channel::mpsc::unbounded();
+	let inner = native_inner( sender, DriverState::Idle( Box::pin( futures::future::pending() )));
+	inner.fail( &expected );
+	let driver = inner.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
+	assert!( matches!( &*driver, DriverState::Failed( error ) if error == &expected ));
+}
+
+#[test]
+fn a_late_release_does_not_replace_a_terminal_failure() {
+	let expected = AsyncRuntimeError::StoreFailed( "expected".to_string() );
+	let ( sender, _receiver ) = futures::channel::mpsc::unbounded();
+	let inner = native_inner( sender, DriverState::Failed( expected.clone() ));
+	inner.release( Box::pin( futures::future::ready( AsyncRuntimeError::DriverStopped )));
+	let driver = inner.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
+	assert!( matches!( &*driver, DriverState::Failed( error ) if error == &expected ));
+}
+
+#[test]
+fn a_late_release_does_not_replace_the_available_driver() {
+	let expected = AsyncRuntimeError::StoreFailed( "existing".to_string() );
+	let ( sender, _receiver ) = futures::channel::mpsc::unbounded();
+	let inner = native_inner( sender, DriverState::Idle( Box::pin( futures::future::ready( expected.clone() ))));
+	inner.release( Box::pin( futures::future::ready( AsyncRuntimeError::DriverStopped )));
+	let future = {
+		let mut driver = inner.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
+		match std::mem::replace( &mut *driver, DriverState::Failed( AsyncRuntimeError::DriverStopped )) {
+			DriverState::Idle( future ) => Some( future ),
+			_ => None,
+		}
+	};
+	assert_eq!( future.map( futures::executor::block_on ), Some( expected ));
+}
+
+#[test]
+fn failed_handoff_reports_the_exact_error_to_the_waiting_call() -> Result<(), Box<dyn std::error::Error>> {
+	let ( sender, receiver ) = futures::channel::mpsc::unbounded();
+	drop( receiver );
+	let scheduler = AsyncScheduler::<Context>::testing();
+	let ( request, result ) = request( "get-value" );
+	let inner = native_inner( sender, DriverState::Attached {
+		owner: 1,
+		waiting: std::collections::VecDeque::from([ PendingSession {
+			scheduler,
+			requests: std::collections::VecDeque::from([ request ]),
+		}]),
+	});
+	inner.release( Box::pin( futures::future::pending() ));
+	assert_runtime_error( futures::executor::block_on( result )?, &AsyncRuntimeError::DriverStopped )
 }
 
 #[test]
@@ -104,7 +183,7 @@ fn store_failure_reaches_the_call_as_the_exact_runtime_error() -> Result<(), Box
 		let result = crate::async_scheduler::run( move | scheduler | async move {
 			let path = crate::async_scheduler::ExecutionPathId::ROOT;
 			plugin.handle().dispatch_async(
-				DispatchContext::new( &scheduler, scheduler.origin(), path ),
+				&DispatchContext::new( &scheduler, scheduler.origin(), path ),
 				"test:single-plugin",
 				"root",
 				"get-value",
@@ -114,6 +193,41 @@ fn store_failure_reaches_the_call_as_the_exact_runtime_error() -> Result<(), Box
 		}).await;
 		assert_runtime_error( result, &expected )
 	})
+}
+
+#[test]
+fn store_failure_reaches_an_already_admitted_call_as_the_exact_error() -> Result<(), Box<dyn std::error::Error>> {
+	let ( response, result ) = futures::channel::oneshot::channel();
+	let scheduler = AsyncScheduler::<Context>::testing();
+	let expected = AsyncRuntimeError::StoreFailed( "expected".to_string() );
+	fail_active_calls( vec![ ActiveCallRecord {
+		active: ActiveCall { scheduler, caller: PluginKey( 1 ), path: crate::async_scheduler::ExecutionPathId::ROOT },
+		response: Some( response ),
+	}], &expected );
+	assert_runtime_error( futures::executor::block_on( result )?, &expected )
+}
+
+#[test]
+fn async_dispatch_rejects_an_unsupported_argument_before_scheduling() -> Result<(), Box<dyn std::error::Error>> {
+	let state = test_state_without_concurrency()?;
+	let plugin = PluginInstanceAsync::from( super::PluginInstanceSync { state });
+	let scheduler = AsyncScheduler::testing();
+	let mut store = Store::new(
+		&Engine::default(),
+		Context { table: ResourceTable::new() },
+	);
+	let future = FutureReader::new( &mut store, async { Ok::<_, wasmtime::Error>( 1_u32 )})?
+		.try_into_future_any( &mut store )?;
+	let result = futures::executor::block_on( plugin.handle().dispatch_async(
+		&DispatchContext::new( &scheduler, scheduler.origin(), crate::async_scheduler::ExecutionPathId::ROOT ),
+		"test:single-plugin",
+		"root",
+		"get-value",
+		&Function::new( FunctionKind::Freestanding, ReturnKind::AssumeNoResources ),
+		&[ Val::Future( future ) ],
+	));
+	assert!( matches!( result, Err( DispatchError::UnsupportedType( name )) if name == "future" ));
+	Ok(())
 }
 
 #[test]
@@ -169,6 +283,24 @@ fn concurrent_driver_reports_exact_invalid_export_errors() -> Result<(), Box<dyn
 			non_function_result.await?,
 			Err( DispatchError::InvalidFunction( function )) if function == "test:dispatch-error/root:not-a-function"
 		));
+		Ok(())
+	})
+}
+
+#[test]
+fn concurrent_driver_reports_the_exact_call_start_error() -> Result<(), Box<dyn std::error::Error>> {
+	futures::executor::block_on( async {
+		let mut state = test_state().await?;
+		let ( sender, receiver ) = futures::channel::mpsc::unbounded();
+		let ( mut request, result ) = request( "get-value" );
+		request.data.push( Val::U32( 1 ));
+		sender.unbounded_send( DriverMessage::Call( request ))?;
+		drop( sender );
+		assert_eq!( state.run_requests( receiver, active_calls() ).await, AsyncRuntimeError::DriverStopped );
+		let Err( DispatchError::RuntimeException( error )) = result.await? else {
+			return Err( "expected RuntimeException".into() );
+		};
+		assert_eq!( error.to_string(), "expected 0 argument(s), got 1" );
 		Ok(())
 	})
 }

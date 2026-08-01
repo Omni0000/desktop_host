@@ -34,12 +34,6 @@ pub(crate) struct DispatchContext<'a, Ctx: 'static> {
 	pub(crate) path: ExecutionPathId,
 }
 
-impl<Ctx: 'static> Copy for DispatchContext<'_, Ctx> {}
-
-impl<Ctx: 'static> Clone for DispatchContext<'_, Ctx> {
-	fn clone( &self ) -> Self { *self }
-}
-
 pub(crate) struct LinkDispatchContext<'a, Ctx: 'static> {
 	pub(crate) calls: &'a ActiveCalls<Ctx>,
 }
@@ -429,6 +423,96 @@ mod tests {
 			if let Some( call ) = call { order.push( call.name ); }
 		}
 		assert_eq!( order, [ "a1-first", "b1", "a2", "a1-second" ]);
+	}
+
+	#[test]
+	fn a_busy_caller_cannot_starve_another_caller() {
+		let busy = PluginKey( 1 );
+		let quiet = PluginKey( 2 );
+		let mut queue = DestinationQueue::default();
+		for sequence in 0..50 {
+			queue = queue.enqueue( busy, path( 1 ), TestCall { sequence, name: "busy" });
+		}
+		queue = queue.enqueue( quiet, path( 2 ), TestCall { sequence: 50, name: "quiet" });
+		let ( queue, first ) = queue.dequeue();
+		let ( _, second ) = queue.dequeue();
+		assert_eq!( [ first.map(| call | call.name ), second.map(| call | call.name ) ], [ Some( "busy" ), Some( "quiet" ) ]);
+	}
+
+	#[test]
+	fn a_busy_route_cannot_starve_another_route_from_the_same_caller() {
+		let caller = PluginKey( 1 );
+		let mut queue = DestinationQueue::default();
+		for sequence in 0..50 {
+			queue = queue.enqueue( caller, path( 1 ), TestCall { sequence, name: "busy-route" });
+		}
+		queue = queue.enqueue( caller, path( 2 ), TestCall { sequence: 50, name: "quiet-route" });
+		let ( queue, first ) = queue.dequeue();
+		let ( _, second ) = queue.dequeue();
+		assert_eq!( [ first.map(| call | call.name ), second.map(| call | call.name ) ], [ Some( "busy-route" ), Some( "quiet-route" ) ]);
+	}
+
+	#[test]
+	fn call_heavy_routes_merging_in_one_plugin_receive_equal_turns() {
+		let caller = PluginKey( 1 );
+		let mut queue = DestinationQueue::default();
+		for sequence in 0..50 {
+			queue = queue
+				.enqueue( caller, path( 1 ), TestCall { sequence: sequence * 2, name: "route-a" })
+				.enqueue( caller, path( 2 ), TestCall { sequence: sequence * 2 + 1, name: "route-b" });
+		}
+		let mut served_a = 0_i32;
+		let mut served_b = 0_i32;
+		while !queue.is_empty() {
+			let ( remaining, call ) = queue.dequeue();
+			queue = remaining;
+			let name = call.map(| call | call.name );
+			assert!( matches!( name, Some( "route-a" | "route-b" )));
+			served_a += i32::from( name == Some( "route-a" ));
+			served_b += i32::from( name == Some( "route-b" ));
+			assert!(( served_a - served_b ).abs() <= 1, "one execution route monopolized the destination" );
+		}
+		assert_eq!(( served_a, served_b ), ( 50, 50 ));
+	}
+
+	#[test]
+	fn one_call_heavy_route_cannot_starve_another_across_two_boundaries() {
+		let busy_origin = PluginKey( 1 );
+		let quiet_origin = PluginKey( 2 );
+		let shared_plugin = PluginKey( 3 );
+		let mut first_boundary = DestinationQueue::default();
+		for sequence in 0..50 {
+			first_boundary = first_boundary.enqueue(
+				busy_origin,
+				path( 1 ),
+				TestCall { sequence, name: "busy-route" },
+			);
+		}
+		first_boundary = first_boundary.enqueue(
+			quiet_origin,
+			path( 2 ),
+			TestCall { sequence: 50, name: "quiet-route" },
+		);
+		let ( first_boundary, _ ) = first_boundary.dequeue();
+		let ( _, quiet_at_first_boundary ) = first_boundary.dequeue();
+		assert_eq!( quiet_at_first_boundary.map(| call | call.name ), Some( "quiet-route" ));
+
+		let mut second_boundary = DestinationQueue::default();
+		for sequence in 0..50 {
+			second_boundary = second_boundary.enqueue(
+				shared_plugin,
+				path( 3 ),
+				TestCall { sequence, name: "busy-route" },
+			);
+		}
+		second_boundary = second_boundary.enqueue(
+			shared_plugin,
+			path( 4 ),
+			TestCall { sequence: 50, name: "quiet-route" },
+		);
+		let ( second_boundary, _ ) = second_boundary.dequeue();
+		let ( _, quiet_at_second_boundary ) = second_boundary.dequeue();
+		assert_eq!( quiet_at_second_boundary.map(| call | call.name ), Some( "quiet-route" ));
 	}
 
 	#[test]

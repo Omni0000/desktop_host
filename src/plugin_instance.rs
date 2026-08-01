@@ -278,7 +278,7 @@ impl<Ctx: PluginContext + 'static> PluginInstanceAsync<Ctx> {
 impl<Ctx: PluginContext + 'static> PluginDispatchHandle<Ctx> {
 	pub(crate) fn dispatch_async(
 		&self,
-		dispatch: DispatchContext<'_, Ctx>,
+		dispatch: &DispatchContext<'_, Ctx>,
 		package_name: &str,
 		interface_name: &str,
 		function_name: &str,
@@ -352,30 +352,34 @@ impl<Ctx: PluginContext + 'static> AsyncInstanceInner<Ctx> {
 		scheduler: &AsyncScheduler<Ctx>,
 		request: AsyncRequest<Ctx>,
 	) {
-		let mut driver = self.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
 		let owner = scheduler.session_id();
-		let future = match &mut *driver {
-			DriverState::Idle( _ ) => match std::mem::replace( &mut *driver, DriverState::Attached {
-				owner,
-				waiting: VecDeque::new(),
-			}) {
-				DriverState::Idle( future ) => Some( future ),
-				_ => None,
+		let mut driver = self.driver.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
+		let previous = std::mem::replace( &mut *driver, DriverState::Failed( AsyncRuntimeError::DriverStopped ));
+		let future = match previous {
+			DriverState::Idle( future ) => {
+				*driver = DriverState::Attached { owner, waiting: VecDeque::new() };
+				Some( future )
 			},
-			DriverState::Attached { owner: current, waiting } if *current == owner => None,
-			DriverState::Attached { waiting, .. } => {
-				if let Some( pending ) = waiting.iter_mut().find(| pending | pending.scheduler.session_id() == owner ) {
-					pending.requests.push_back( request );
-				} else {
-					waiting.push_back( PendingSession {
-						scheduler: scheduler.clone(),
-						requests: VecDeque::from([ request ]),
-					});
+			DriverState::Attached { owner: current, waiting } if current == owner => {
+				*driver = DriverState::Attached { owner, waiting };
+				None
+			},
+			DriverState::Attached { owner: current, mut waiting } => {
+				if let Some( index ) = waiting.iter().position(| pending | pending.scheduler.session_id() == owner ) {
+					waiting[index].requests.push_back( request );
+					*driver = DriverState::Attached { owner: current, waiting };
+					return;
 				}
+				waiting.push_back( PendingSession {
+					scheduler: scheduler.clone(),
+					requests: VecDeque::from([ request ]),
+				});
+				*driver = DriverState::Attached { owner: current, waiting };
 				return;
 			},
 			DriverState::Failed( error ) => {
 				request.respond( Err( runtime_error( error.clone() )));
+				*driver = DriverState::Failed( error );
 				return;
 			},
 		};
@@ -441,9 +445,11 @@ impl<Ctx: PluginContext + 'static> AsyncInstanceInner<Ctx> {
 			DriverState::Attached { waiting, .. } => waiting,
 			_ => VecDeque::new(),
 		};
-		waiting.into_iter().flat_map(| pending | pending.requests).for_each(| request |
-			request.respond( Err( runtime_error( error.clone() )))
-		);
+		for pending in waiting {
+			for request in pending.requests {
+				request.respond( Err( runtime_error( error.clone() )));
+			}
+		}
 	}
 }
 
@@ -588,12 +594,8 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 			let error = AsyncRuntimeError::StoreFailed( error.to_string() );
 			let active = std::mem::take(
 				&mut *active_calls.lock().unwrap_or_else( std::sync::PoisonError::into_inner ),
-			);
-			for mut record in active.into_values() {
-				if let Some( response ) = record.response.take() {
-					let _ = response.send( Err( runtime_error( error.clone() )));
-				}
-			}
+			).into_values().collect();
+			fail_active_calls( active, &error );
 			while let Ok( message ) = receiver.try_recv() {
 				let DriverMessage::Call( request ) = message;
 				request.respond( Err( runtime_error( error.clone() )));
@@ -657,6 +659,14 @@ impl<Ctx: PluginContext + 'static> PluginState<Ctx> {
 		resolve_export( &self.interface_remaps, package_name, interface_name, function_name )
 	}
 
+}
+
+fn fail_active_calls<Ctx: 'static>( active: Vec<ActiveCallRecord<Ctx>>, error: &AsyncRuntimeError ) {
+	for mut record in active {
+		if let Some( response ) = record.response.take() {
+			let _ = response.send( Err( runtime_error( error.clone() )));
+		}
+	}
 }
 
 fn start_concurrent_call<'a, Ctx: PluginContext + 'static>(

@@ -382,7 +382,7 @@ where
 			async move {
 				let instance = plugin.lock().await.handle();
 				instance.dispatch_async(
-					crate::async_scheduler::DispatchContext::new( &scheduler, caller, path ),
+					&crate::async_scheduler::DispatchContext::new( &scheduler, caller, path ),
 					&package_name,
 					&interface_name,
 					&function_name,

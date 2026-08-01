@@ -297,7 +297,7 @@ where
 {
 	let instance = plugin.lock().await.handle();
 	let result = instance.dispatch_async(
-		dispatch,
+		&dispatch,
 		target.package_name,
 		target.interface_name,
 		target.function_name,
@@ -328,7 +328,7 @@ where
 {
 	let instance = plugin.lock().await.handle();
 	let result = instance.dispatch_async(
-		dispatch,
+		&dispatch,
 		target.package_name,
 		target.interface_name,
 		target.function_name,
