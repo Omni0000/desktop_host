@@ -107,7 +107,7 @@ struct SchedulerState<Ctx: 'static> {
 	next_path: u64,
 	next_sequence: u64,
 	paths: HashMap<( ExecutionPathId, PluginKey ), ExecutionPathId>,
-	ready: BTreeMap<usize, HashMap<PluginKey, DestinationQueue<ScheduledCall<Ctx>>>>,
+	ready: ReadyQueues<ScheduledCall<Ctx>>,
 	drivers: Vec<BoxFuture<'static, ()>>,
 }
 
@@ -119,7 +119,7 @@ impl<Ctx: PluginContext + 'static> AsyncScheduler<Ctx> {
 				next_path: 1,
 				next_sequence: 0,
 				paths: HashMap::new(),
-				ready: BTreeMap::new(),
+				ready: ReadyQueues::default(),
 				drivers: Vec::new(),
 			}),
 			waker: AtomicWaker::new(),
@@ -157,9 +157,7 @@ impl<Ctx: PluginContext + 'static> AsyncScheduler<Ctx> {
 		let destination = target.key();
 		let call = ScheduledCall { sequence: state.next_sequence, target, request };
 		state.next_sequence += 1;
-		let queues = state.ready.entry( path.depth ).or_default();
-		let queue = queues.remove( &destination ).unwrap_or_default();
-		queues.insert( destination, queue.enqueue( caller, path, call ));
+		state.ready.enqueue( caller, path, destination, call );
 		drop( state );
 		self.shared.waker.wake();
 	}
@@ -174,14 +172,7 @@ impl<Ctx: PluginContext + 'static> AsyncScheduler<Ctx> {
 
 	fn take_call( &self ) -> Option<ScheduledCall<Ctx>> {
 		let mut state = self.shared.state.lock().unwrap_or_else( std::sync::PoisonError::into_inner );
-		let depth = state.ready.last_key_value().map(|( depth, _ )| *depth )?;
-		let queues = state.ready.get_mut( &depth )?;
-		let destination = oldest_destination( queues )?;
-		let queue = queues.remove( &destination )?;
-		let ( queue, call ) = queue.dequeue();
-		if !queue.is_empty() { queues.insert( destination, queue ); }
-		if queues.is_empty() { state.ready.remove( &depth ); }
-		call
+		state.ready.dequeue()
 	}
 
 	fn take_drivers( &self ) -> Vec<BoxFuture<'static, ()>> {
@@ -203,6 +194,34 @@ fn oldest_destination<T: Created>( queues: &HashMap<PluginKey, DestinationQueue<
 	queues.iter()
 		.min_by_key(|( _, queue )| queue.next_sequence())
 		.map(|( destination, _ )| *destination)
+}
+
+
+struct ReadyQueues<T> {
+	depths: BTreeMap<usize, HashMap<PluginKey, DestinationQueue<T>>>,
+}
+
+impl<T> Default for ReadyQueues<T> {
+	fn default() -> Self { Self { depths: BTreeMap::new() } }
+}
+
+impl<T: Created> ReadyQueues<T> {
+	fn enqueue( &mut self, caller: PluginKey, path: ExecutionPathId, destination: PluginKey, call: T ) {
+		let queues = self.depths.entry( path.depth ).or_default();
+		let queue = queues.remove( &destination ).unwrap_or_default();
+		queues.insert( destination, queue.enqueue( caller, path, call ));
+	}
+
+	fn dequeue( &mut self ) -> Option<T> {
+		let depth = self.depths.last_key_value().map(|( depth, _ )| *depth )?;
+		let queues = self.depths.get_mut( &depth )?;
+		let destination = oldest_destination( queues )?;
+		let queue = queues.remove( &destination )?;
+		let ( queue, call ) = queue.dequeue();
+		if !queue.is_empty() { queues.insert( destination, queue ); }
+		if queues.is_empty() { self.depths.remove( &depth ); }
+		call
+	}
 }
 
 
@@ -389,7 +408,7 @@ mod tests {
 
 	use wasmtime::component::ResourceTable;
 
-	use super::{ AsyncScheduler, Created, DestinationQueue, ExecutionPathId, PluginKey, oldest_destination };
+	use super::{ AsyncScheduler, Created, DestinationQueue, ExecutionPathId, PluginKey, ReadyQueues, oldest_destination };
 	use crate::PluginContext;
 
 	struct TestContext { resources: ResourceTable }
@@ -402,6 +421,12 @@ mod tests {
 	struct TestCall { sequence: u64, name: &'static str }
 
 	impl Created for TestCall {
+		fn sequence( &self ) -> u64 { self.sequence }
+	}
+
+	struct RoutedCall { sequence: u64, name: &'static str, path: ExecutionPathId }
+
+	impl Created for RoutedCall {
 		fn sequence( &self ) -> u64 { self.sequence }
 	}
 
@@ -480,39 +505,47 @@ mod tests {
 		let busy_origin = PluginKey( 1 );
 		let quiet_origin = PluginKey( 2 );
 		let shared_plugin = PluginKey( 3 );
-		let mut first_boundary = DestinationQueue::default();
+		let destination = PluginKey( 4 );
+		let scheduler = AsyncScheduler::<TestContext>::new();
+		let busy_path = scheduler.child_path( ExecutionPathId::ROOT, busy_origin );
+		let quiet_path = scheduler.child_path( ExecutionPathId::ROOT, quiet_origin );
+		let busy_shared_path = scheduler.child_path( busy_path, shared_plugin );
+		let quiet_shared_path = scheduler.child_path( quiet_path, shared_plugin );
+		let mut first_boundary = ReadyQueues::default();
 		for sequence in 0..50 {
-			first_boundary = first_boundary.enqueue(
+			first_boundary.enqueue(
 				busy_origin,
-				path( 1 ),
-				TestCall { sequence, name: "busy-route" },
-			);
-		}
-		first_boundary = first_boundary.enqueue(
-			quiet_origin,
-			path( 2 ),
-			TestCall { sequence: 50, name: "quiet-route" },
-		);
-		let ( first_boundary, _ ) = first_boundary.dequeue();
-		let ( _, quiet_at_first_boundary ) = first_boundary.dequeue();
-		assert_eq!( quiet_at_first_boundary.map(| call | call.name ), Some( "quiet-route" ));
-
-		let mut second_boundary = DestinationQueue::default();
-		for sequence in 0..50 {
-			second_boundary = second_boundary.enqueue(
+				busy_shared_path,
 				shared_plugin,
-				path( 3 ),
-				TestCall { sequence, name: "busy-route" },
+				RoutedCall { sequence, name: "busy-route", path: busy_shared_path },
 			);
 		}
-		second_boundary = second_boundary.enqueue(
+		first_boundary.enqueue(
+			quiet_origin,
+			quiet_shared_path,
 			shared_plugin,
-			path( 4 ),
-			TestCall { sequence: 50, name: "quiet-route" },
+			RoutedCall { sequence: 50, name: "quiet-route", path: quiet_shared_path },
 		);
-		let ( second_boundary, _ ) = second_boundary.dequeue();
-		let ( _, quiet_at_second_boundary ) = second_boundary.dequeue();
-		assert_eq!( quiet_at_second_boundary.map(| call | call.name ), Some( "quiet-route" ));
+
+		let admitted = [ first_boundary.dequeue(), first_boundary.dequeue() ];
+		assert_eq!( admitted.each_ref().map(| call | call.as_ref().map(| call | call.name )), [
+			Some( "busy-route" ), Some( "quiet-route" ),
+		]);
+		let mut second_boundary = ReadyQueues::default();
+		for call in admitted.into_iter().flatten() {
+			let destination_path = scheduler.child_path( call.path, destination );
+			let call_count = if call.name == "busy-route" { 50 } else { 1 };
+			for sequence in 0..call_count {
+				second_boundary.enqueue(
+					shared_plugin,
+					destination_path,
+					destination,
+					RoutedCall { sequence, name: call.name, path: destination_path },
+				);
+			}
+		}
+		assert_eq!( second_boundary.dequeue().map(| call | call.name ), Some( "busy-route" ));
+		assert_eq!( second_boundary.dequeue().map(| call | call.name ), Some( "quiet-route" ));
 	}
 
 	#[test]
